@@ -528,6 +528,62 @@ class MasterDnsVPNClient:
         self.logger.info("=" * 80)
         self.logger.info("<y>Testing MTU sizes for all resolver-domain pairs...</y>")
 
+        try:
+            self.logger.info("=" * 80)
+            self.logger.info(
+                "<cyan>🛡️ [Stealth Mode] Calculating optimal MTUs for Severe Filtering & High Loss...</cyan>"
+            )
+
+            raw_header = bytes([0, Packet_Type.STREAM_DATA, 0, 0, 0, 0, 0, 0, 0, 0])
+            if self.encryption_method == 0:
+                enc_header = raw_header
+            else:
+                enc_header = self.dns_packet_parser.codec_transform(
+                    raw_header, encrypt=True
+                )
+
+            base36_header = self.dns_packet_parser.base_encode(
+                enc_header, lowerCaseOnly=True
+            )
+            prefix_len = len(base36_header) + 3
+
+            available_txt_chars = 191 - prefix_len
+
+            max_enc_down_bytes = (available_txt_chars // 4) * 3
+            optimal_down_mtu = max_enc_down_bytes - self.crypto_overhead
+
+            unique_domains = set(self.domains)
+            for d in unique_domains:
+                _, max_up_bytes = self.dns_packet_parser.calculate_upload_mtu(
+                    domain=d, mtu=0
+                )
+                optimal_up_mtu = min(100, max_up_bytes)
+
+                self.logger.info(
+                    f"   Domain: <yellow>{d}</yellow> -> "
+                    f"MIN and MAX_UPLOAD_MTU = <green>{optimal_up_mtu}</green> | "
+                    f"MIN and MAX_DOWNLOAD_MTU = <green>{optimal_down_mtu}</green> | "
+                    f"MAX_PACKETS_PER_BATCH = <green>3</green>"
+                )
+
+            # Note: you can test MTUs with more than this values
+            self.logger.info(
+                "<red>   [Note]</red> The calculated optimal MTUs for stealth mode are quite low due to the heavy encryption overhead and DNS encoding. In real-world conditions with severe filtering, you may find that only very small MTUs succeed consistently. It's recommended to use these values as a baseline and adjust based on observed performance and reliability in your specific environment."
+            )
+            self.logger.info(
+                "<red>   [Note]</red> But if you find that even these low MTUs are not reliable, you may need to further reduce them or increase packet duplication to improve chances of successful transmission."
+            )
+            self.logger.info(
+                "<red>   [Note]</red> Always prioritize reliability over speed in highly restrictive environments, and consider using the stealth mode MTU values as a starting point for further tuning based on your testing results."
+            )
+            self.logger.info(
+                "<red>   [Note]</red> The MTU testing process can be time-consuming, especially if you have many resolvers and domains. It's recommended to start with a smaller set of servers for initial testing to quickly identify any major issues before scaling up to test all combinations."
+            )
+
+            self.logger.info("=" * 80)
+        except Exception as e:
+            self.logger.debug(f"Failed to calculate stealth MTU: {e}")
+
         server_id = 0
         total_conns = len(self.connections_map)
 
