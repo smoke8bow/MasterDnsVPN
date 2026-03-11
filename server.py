@@ -1064,18 +1064,7 @@ class MasterDnsVPNServer:
     ) -> Optional[bytes]:
         """Handle MTU_DOWN_REQ (download MTU test) VPN packet."""
 
-        dot_idx = labels.find(".")
-        if dot_idx <= 0:
-            self.logger.warning(
-                f"Invalid or empty SERVER_DOWNLOAD_TEST packet format from {addr}"
-            )
-            return None
-
-        first_part_of_data = labels[:dot_idx]
-
-        download_size_bytes = self.dns_parser.decode_and_decrypt_data(
-            first_part_of_data, lowerCaseOnly=True
-        )
+        download_size_bytes = self.dns_parser.extract_vpn_data_from_labels(labels)
 
         if not download_size_bytes or len(download_size_bytes) < 5:
             self.logger.warning(
