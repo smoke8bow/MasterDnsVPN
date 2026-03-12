@@ -61,7 +61,13 @@ echo -e "           MasterDnsVPN Server Auto-Installer${NC}"
 echo -e "${CYAN}------------------------------------------------------${NC}"
 
 TMP_LOG="init_logs.tmp"
-cleanup() { rm -f "$TMP_LOG" 2>/dev/null || true; }
+DOWNLOAD_DIR=""
+cleanup() {
+  rm -f "$TMP_LOG" 2>/dev/null || true
+  if [[ -n "${DOWNLOAD_DIR:-}" && -d "${DOWNLOAD_DIR:-}" ]]; then
+    rm -rf "$DOWNLOAD_DIR" 2>/dev/null || true
+  fi
+}
 trap cleanup EXIT
 
 PM=""
@@ -236,10 +242,20 @@ if [[ -f "server_config.toml" ]]; then
 fi
 
 log_info "Downloading server binaries..."
-rm -f server.zip
-curl -fsSL -o server.zip "$URL" || wget -qO server.zip "$URL" || log_error "Download failed."
-unzip -q -o server.zip
-rm -f server.zip
+DOWNLOAD_DIR="$(mktemp -d /tmp/masterdnsvpn_download.XXXXXX)"
+ZIP_PATH="${DOWNLOAD_DIR}/server.zip"
+
+if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 -o "$ZIP_PATH" "$URL"; then
+  log_warn "curl download failed, trying wget..."
+  wget -qO "$ZIP_PATH" "$URL" || {
+    log_warn "Disk usage snapshot:"
+    df -h "$INSTALL_DIR" /tmp 2>/dev/null || true
+    log_error "Download failed."
+  }
+fi
+
+[[ -s "$ZIP_PATH" ]] || log_error "Downloaded archive is missing or empty: $ZIP_PATH"
+unzip -q -o "$ZIP_PATH" -d "$INSTALL_DIR" || log_error "Failed to extract archive."
 log_success "Files extracted."
 
 EXECUTABLE="$(ls -t ${PREFIX}_v* 2>/dev/null | head -n1 || true)"
