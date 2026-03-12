@@ -206,7 +206,14 @@ class MasterDnsVPNServer:
             Packet_Type.STREAM_RST_ACK,
         }
         self._packable_control_types = set(self._control_ack_types)
+        self._packable_control_types.update(self._control_request_ack_map.keys())
         self._packable_control_types.add(Packet_Type.STREAM_DATA_ACK)
+        self._packable_control_types.update({
+            Packet_Type.STREAM_SYN,
+            Packet_Type.STREAM_FIN,
+            Packet_Type.STREAM_RST,
+            Packet_Type.SOCKS5_SYN,
+        })
         self._socks5_rep_packet_map = {
             0x01: Packet_Type.SOCKS5_CONNECT_FAIL,
             0x02: Packet_Type.SOCKS5_RULESET_DENIED,
@@ -249,9 +256,7 @@ class MasterDnsVPNServer:
                 "main_queue": [],
                 "round_robin_index": 0,
                 "enqueue_seq": 0,
-                "count_ack": 0,
-                "count_data": 0,
-                "count_resend": 0,
+                "priority_counts": {},
                 "track_ack": set(),
                 "track_resend": set(),
                 "track_types": set(),
@@ -308,6 +313,8 @@ class MasterDnsVPNServer:
             session.get("track_ack", set()).clear()
             session.get("track_resend", set()).clear()
             session.get("track_types", set()).clear()
+            session.get("track_data", set()).clear()
+            session.get("priority_counts", {}).clear()
             session.get("streams", {}).clear()
         except Exception:
             pass
@@ -332,6 +339,64 @@ class MasterDnsVPNServer:
                 session["last_packet_time"] = time.monotonic()
         except Exception:
             pass
+
+    def _inc_priority_counter(self, owner: dict, priority: int) -> None:
+        """Increase queued-packet count by effective priority."""
+        counters = owner.setdefault("priority_counts", {})
+        p = int(priority)
+        counters[p] = counters.get(p, 0) + 1
+
+    def _dec_priority_counter(self, owner: dict, priority: int) -> None:
+        """Decrease queued-packet count by effective priority."""
+        counters = owner.get("priority_counts")
+        if not counters:
+            return
+        p = int(priority)
+        current = counters.get(p, 0)
+        if current <= 1:
+            counters.pop(p, None)
+        else:
+            counters[p] = current - 1
+
+    def _release_tracking_on_pop(self, owner: dict, packet_type: int, sn: int) -> None:
+        """Release dedupe tracking state after popping from queue."""
+        ptype = int(packet_type)
+        if ptype == Packet_Type.STREAM_DATA:
+            owner.get("track_data", set()).discard(sn)
+        elif ptype == Packet_Type.STREAM_DATA_ACK:
+            owner.get("track_ack", set()).discard(sn)
+        elif ptype == Packet_Type.STREAM_RESEND:
+            owner.get("track_resend", set()).discard(sn)
+        elif ptype == Packet_Type.STREAM_FIN:
+            owner.get("track_fin", set()).discard(ptype)
+            owner.get("track_types", set()).discard(ptype)
+        elif ptype in (Packet_Type.STREAM_SYN, Packet_Type.STREAM_SYN_ACK, Packet_Type.SOCKS5_SYN_ACK):
+            owner.get("track_syn_ack", set()).discard(ptype)
+            owner.get("track_types", set()).discard(ptype)
+
+    def _on_queue_pop(self, owner: dict, queue_item: tuple) -> None:
+        """Apply queue bookkeeping for one popped item."""
+        priority, _, ptype, _, sn, _ = queue_item
+        self._dec_priority_counter(owner, priority)
+        self._release_tracking_on_pop(owner, ptype, sn)
+
+    def _pop_packable_control_block(self, queue, owner: dict, priority: int):
+        """Pop one packable control block from queue if top item is compatible."""
+        if not queue:
+            return None
+
+        item = queue[0]
+        if int(item[0]) != int(priority):
+            return None
+
+        ptype = int(item[2])
+        payload = item[5]
+        if ptype not in self._packable_control_types or payload:
+            return None
+
+        popped = heapq.heappop(queue)
+        self._on_queue_pop(owner, popped)
+        return popped
 
     async def _handle_session_init(
         self,
@@ -565,6 +630,9 @@ class MasterDnsVPNServer:
         if isinstance(exc, asyncio.TimeoutError):
             return Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE
 
+        if isinstance(exc, socket.gaierror):
+            return Packet_Type.SOCKS5_HOST_UNREACHABLE
+
         if isinstance(exc, OSError):
             err_no = getattr(exc, "errno", None)
             if err_no in (111, 10061, 61):
@@ -584,6 +652,11 @@ class MasterDnsVPNServer:
             return Packet_Type.SOCKS5_AUTH_FAILED
         if "address type" in msg:
             return Packet_Type.SOCKS5_ADDRESS_TYPE_UNSUPPORTED
+        if "timed out" in msg:
+            return Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE
+        if "unreachable" in msg:
+            return Packet_Type.SOCKS5_HOST_UNREACHABLE
+
 
         return Packet_Type.SOCKS5_CONNECT_FAIL
 
@@ -625,11 +698,7 @@ class MasterDnsVPNServer:
                 "status": "SOCKS_HANDSHAKE",
                 "arq_obj": None,
                 "tx_queue": [],
-                "count_ack": 0,
-                "count_fin": 0,
-                "count_syn_ack": 0,
-                "count_data": 0,
-                "count_resend": 0,
+                "priority_counts": {},
                 "track_ack": set(),
                 "track_fin": set(),
                 "track_syn_ack": set(),
@@ -966,10 +1035,9 @@ class MasterDnsVPNServer:
         stream_id = extracted_header.get("stream_id", 0) if extracted_header else 0
         sn = extracted_header.get("sequence_num", 0) if extracted_header else 0
 
-        if await self._handle_closed_stream_packet(
+        _ = await self._handle_closed_stream_packet(
             session_id, stream_id, packet_type, sn
-        ):
-            return None
+        )
 
         streams = session.get("streams")
         if streams is None:
@@ -1024,47 +1092,9 @@ class MasterDnsVPNServer:
             item = heapq.heappop(target_queue)
             q_ptype, q_stream_id, q_sn = item[2], item[3], item[4]
 
-            if is_main:
-                if q_ptype == Packet_Type.STREAM_DATA:
-                    session["track_data"].discard(q_sn)
-                    if session["count_data"] > 0:
-                        session["count_data"] -= 1
-                elif q_ptype == Packet_Type.STREAM_DATA_ACK:
-                    session["track_ack"].discard(q_sn)
-                    if session["count_ack"] > 0:
-                        session["count_ack"] -= 1
-                elif q_ptype == Packet_Type.STREAM_RESEND:
-                    session["track_resend"].discard(q_sn)
-                    if session["count_resend"] > 0:
-                        session["count_resend"] -= 1
-                elif q_ptype in (
-                    Packet_Type.STREAM_FIN,
-                    Packet_Type.STREAM_SYN,
-                    Packet_Type.STREAM_SYN_ACK,
-                ):
-                    session["track_types"].discard(q_ptype)
-            else:
-                if q_ptype == Packet_Type.STREAM_DATA:
-                    selected_stream_data["track_data"].discard(q_sn)
-                    if selected_stream_data["count_data"] > 0:
-                        selected_stream_data["count_data"] -= 1
-                elif q_ptype == Packet_Type.STREAM_DATA_ACK:
-                    selected_stream_data["track_ack"].discard(q_sn)
-                    if selected_stream_data["count_ack"] > 0:
-                        selected_stream_data["count_ack"] -= 1
-                elif q_ptype == Packet_Type.STREAM_RESEND:
-                    selected_stream_data["track_resend"].discard(q_sn)
-                    if selected_stream_data["count_resend"] > 0:
-                        selected_stream_data["count_resend"] -= 1
-                elif q_ptype == Packet_Type.STREAM_FIN:
-                    selected_stream_data["track_fin"].discard(q_ptype)
-                    if selected_stream_data["count_fin"] > 0:
-                        selected_stream_data["count_fin"] -= 1
-                elif q_ptype == Packet_Type.STREAM_SYN_ACK:
-                    selected_stream_data["track_syn_ack"].discard(q_ptype)
-                    if selected_stream_data["count_syn_ack"] > 0:
-                        selected_stream_data["count_syn_ack"] -= 1
-
+            pop_owner = session if is_main else selected_stream_data
+            if pop_owner is not None:
+                self._on_queue_pop(pop_owner, item)
             res_ptype, res_stream_id, res_sn, res_data = (
                 q_ptype,
                 q_stream_id,
@@ -1081,41 +1111,33 @@ class MasterDnsVPNServer:
                 packed_buffer = bytearray(_pack(res_ptype, res_stream_id, res_sn))
                 blocks = 1
                 max_blocks = session["max_packed_blocks"]
+                target_priority = int(item[0])
 
-                if active_streams:
-                    start_idx = session.get("round_robin_index", 0)
-                    num_active = len(active_streams)
+                candidate_queues = []
+                if main_queue:
+                    candidate_queues.append((main_queue, session))
+                for sid in active_streams:
+                    sdata = streams.get(sid)
+                    if sdata and sdata.get("tx_queue"):
+                        candidate_queues.append((sdata["tx_queue"], sdata))
 
-                    for offset in range(num_active):
+                while blocks < max_blocks:
+                    packed_any = False
+                    for q_ref, owner in candidate_queues:
+                        popped = self._pop_packable_control_block(
+                            q_ref, owner, target_priority
+                        )
+                        if popped is None:
+                            continue
+
+                        packed_buffer.extend(_pack(popped[2], popped[3], popped[4]))
+                        blocks += 1
+                        packed_any = True
                         if blocks >= max_blocks:
                             break
-                        idx = (start_idx + offset) % num_active
-                        sid = active_streams[idx]
-                        sdata = streams[sid]
-                        t_queue = sdata["tx_queue"]
 
-                        while t_queue and blocks < max_blocks:
-                            if not t_queue or blocks >= max_blocks:
-                                break
-                            if (
-                                t_queue[0][2] in self._packable_control_types
-                                and not t_queue[0][5]
-                            ):
-                                popped = heapq.heappop(t_queue)
-                                if popped[2] == Packet_Type.STREAM_DATA_ACK:
-                                    sdata["track_ack"].discard(popped[4])
-                                    if sdata["count_ack"] > 0:
-                                        sdata["count_ack"] -= 1
-                                elif popped[2] == Packet_Type.SOCKS5_SYN_ACK:
-                                    sdata["track_syn_ack"].discard(popped[2])
-                                    if sdata["count_syn_ack"] > 0:
-                                        sdata["count_syn_ack"] -= 1
-                                packed_buffer.extend(
-                                    _pack(popped[2], popped[3], popped[4])
-                                )
-                                blocks += 1
-                            else:
-                                break
+                    if not packed_any:
+                        break
 
                 res_ptype = Packet_Type.PACKED_CONTROL_BLOCKS
                 res_stream_id = 0
@@ -1147,22 +1169,41 @@ class MasterDnsVPNServer:
             return
 
         try:
+            if not target_payload or len(target_payload) < 3:
+                raise Socks5ConnectError(0x01, "Invalid SOCKS5 target payload")
+
             atyp = target_payload[0]
             offset = 1
             if atyp == 0x01:
+                if len(target_payload) < offset + 4 + 2:
+                    raise Socks5ConnectError(0x01, "Truncated IPv4 target payload")
                 target_ip = socket.inet_ntoa(target_payload[offset : offset + 4])
                 offset += 4
             elif atyp == 0x03:
+                if len(target_payload) < offset + 1:
+                    raise Socks5ConnectError(0x01, "Missing domain length in payload")
                 dlen = target_payload[offset]
                 offset += 1
-                target_ip = target_payload[offset : offset + dlen].decode("utf-8")
+                if dlen == 0 or len(target_payload) < offset + dlen + 2:
+                    raise Socks5ConnectError(0x01, "Truncated domain target payload")
+                target_ip = target_payload[offset : offset + dlen].decode(
+                    "utf-8", errors="ignore"
+                )
                 offset += dlen
             elif atyp == 0x04:
+                if len(target_payload) < offset + 16 + 2:
+                    raise Socks5ConnectError(0x01, "Truncated IPv6 target payload")
                 target_ip = socket.inet_ntop(
                     socket.AF_INET6, target_payload[offset : offset + 16]
                 )
                 offset += 16
+            else:
+                raise Socks5ConnectError(
+                    0x08, f"Unsupported SOCKS5 target address type: {atyp}"
+                )
 
+            if len(target_payload) < offset + 2:
+                raise Socks5ConnectError(0x01, "Missing target port in payload")
             target_port = struct.unpack(">H", target_payload[offset : offset + 2])[0]
 
             async def _connect_and_handshake():
@@ -1236,8 +1277,8 @@ class MasterDnsVPNServer:
                 reader, writer = await asyncio.wait_for(
                     _connect_and_handshake(), timeout=45.0
                 )
-            except asyncio.TimeoutError:
-                raise ValueError("Connection to target timed out after 45 seconds")
+            except asyncio.TimeoutError as timeout_exc:
+                raise timeout_exc
 
             if stream_data.get("status") in ("CLOSING", "TIME_WAIT"):
                 writer.close()
@@ -1621,12 +1662,17 @@ class MasterDnsVPNServer:
                     Packet_Type.SOCKS5_SYN_ACK,
                 ):
                     heapq.heappush(main_q, item)
+                    self._inc_priority_counter(session, item[0])
+                    self._dec_priority_counter(stream_data, item[0])
 
         try:
             stream_data["tx_queue"].clear()
             stream_data["track_ack"].clear()
+            stream_data["track_fin"].clear()
+            stream_data["track_syn_ack"].clear()
             stream_data["track_resend"].clear()
             stream_data["track_data"].clear()
+            stream_data["priority_counts"].clear()
             stream_data["status"] = "TIME_WAIT"
             stream_data["close_time"] = time.monotonic()
         except Exception:
@@ -1713,7 +1759,6 @@ class MasterDnsVPNServer:
                 ):
                     return
                 session["track_resend"].add(sn)
-                session["count_resend"] += 1
             elif ptype in (
                 Packet_Type.STREAM_FIN,
                 Packet_Type.STREAM_SYN,
@@ -1727,13 +1772,13 @@ class MasterDnsVPNServer:
                 if sn in session["track_ack"]:
                     return
                 session["track_ack"].add(sn)
-                session["count_ack"] += 1
             elif ptype == Packet_Type.STREAM_DATA:
                 if sn in session.setdefault("track_data", set()):
                     return
                 session["track_data"].add(sn)
-                session["count_data"] += 1
+
             heapq.heappush(session["main_queue"], queue_item)
+            self._inc_priority_counter(session, eff_priority)
             return
 
         stream_data = session.get("streams", {}).get(stream_id)
@@ -1744,35 +1789,32 @@ class MasterDnsVPNServer:
                 Packet_Type.STREAM_FIN_ACK,
             ):
                 heapq.heappush(session["main_queue"], queue_item)
+                self._inc_priority_counter(session, eff_priority)
             return
 
         if ptype == Packet_Type.STREAM_RESEND:
             if sn in stream_data["track_data"] or sn in stream_data["track_resend"]:
                 return
             stream_data["track_resend"].add(sn)
-            stream_data["count_resend"] += 1
         elif ptype == Packet_Type.STREAM_FIN:
             if ptype in stream_data["track_fin"]:
                 return
             stream_data["track_fin"].add(ptype)
-            stream_data["count_fin"] += 1
         elif ptype in (Packet_Type.STREAM_SYN_ACK, Packet_Type.SOCKS5_SYN_ACK):
             if ptype in stream_data["track_syn_ack"]:
                 return
             stream_data["track_syn_ack"].add(ptype)
-            stream_data["count_syn_ack"] += 1
         elif ptype == Packet_Type.STREAM_DATA_ACK:
             if sn in stream_data["track_ack"]:
                 return
             stream_data["track_ack"].add(sn)
-            stream_data["count_ack"] += 1
         elif ptype == Packet_Type.STREAM_DATA:
             if sn in stream_data["track_data"]:
                 return
             stream_data["track_data"].add(sn)
-            stream_data["count_data"] += 1
 
         heapq.heappush(stream_data["tx_queue"], queue_item)
+        self._inc_priority_counter(stream_data, eff_priority)
 
     async def _handle_stream_syn(self, session_id, stream_id):
         session = self.sessions.get(session_id)
@@ -1801,11 +1843,7 @@ class MasterDnsVPNServer:
             "status": "SOCKS_HANDSHAKE",
             "arq_obj": None,
             "tx_queue": [],
-            "count_ack": 0,
-            "count_fin": 0,
-            "count_syn_ack": 0,
-            "count_data": 0,
-            "count_resend": 0,
+            "priority_counts": {},
             "track_ack": set(),
             "track_fin": set(),
             "track_syn_ack": set(),
@@ -2223,3 +2261,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
