@@ -29,7 +29,7 @@ from dns_utils.compression import (
     normalize_compression_type,
     get_compression_name,
     compress_payload,
-    decompress_payload,
+    try_decompress_payload,
 )
 
 
@@ -443,7 +443,10 @@ class MasterDnsVPNServer(PacketQueueMixin):
         if not is_compression_type_available(comp_type):
             return b""
 
-        return decompress_payload(payload, comp_type)
+        decompressed, ok = try_decompress_payload(payload, comp_type)
+        if not ok:
+            return b""
+        return decompressed
 
     def _spawn_background_task(self, coro):
         """Create a tracked background task so shutdown can cancel and release it."""
@@ -1309,10 +1312,11 @@ class MasterDnsVPNServer(PacketQueueMixin):
                     if not packed_any:
                         break
 
-                res_ptype = Packet_Type.PACKED_CONTROL_BLOCKS
-                res_stream_id = 0
-                res_sn = 0
-                res_data = bytes(packed_buffer)
+                if blocks > 1:
+                    res_ptype = Packet_Type.PACKED_CONTROL_BLOCKS
+                    res_stream_id = 0
+                    res_sn = 0
+                    res_data = bytes(packed_buffer)
 
         if res_ptype == Packet_Type.PONG:
             res_data = b"PO:" + os.urandom(4)
@@ -2051,6 +2055,10 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
                         if status == "TIME_WAIT":
                             arq_obj = stream_data.get("arq_obj")
+                            control_reliable = bool(
+                                arq_obj
+                                and getattr(arq_obj, "enable_control_reliability", False)
+                            )
 
                             rst_sent = (
                                 getattr(arq_obj, "_rst_sent", False)
@@ -2072,7 +2080,8 @@ class MasterDnsVPNServer(PacketQueueMixin):
                                 streams.pop(sid, None)
 
                             elif (
-                                rst_sent
+                                not control_reliable
+                                and rst_sent
                                 and not rst_acked
                                 and (now - last_act) > 1.5
                                 and stream_data.get("rst_retries", 0) < 10
@@ -2100,7 +2109,8 @@ class MasterDnsVPNServer(PacketQueueMixin):
                                     )
 
                             elif (
-                                not rst_sent
+                                not control_reliable
+                                and not rst_sent
                                 and not rst_received
                                 and not (
                                     arq_obj and getattr(arq_obj, "_fin_acked", False)

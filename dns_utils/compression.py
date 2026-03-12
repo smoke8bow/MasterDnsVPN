@@ -103,22 +103,31 @@ def compress_payload(
     return data, Compression_Type.OFF
 
 
-def decompress_payload(data: bytes, comp_type: int) -> bytes:
-    """Decompress payload based on compression type."""
+def try_decompress_payload(data: bytes, comp_type: int) -> tuple[bytes, bool]:
+    """
+    Try to decompress payload.
+    Returns: (payload, success)
+    """
     if not data or comp_type == Compression_Type.OFF:
-        return data
+        return data, True
 
     if not is_compression_type_available(comp_type):
-        return data
+        return b"", False
 
     try:
         if comp_type == Compression_Type.ZLIB:
-            return zlib.decompressobj(wbits=-15).decompress(data)
+            return zlib.decompressobj(wbits=-15).decompress(data), True
         if comp_type == Compression_Type.ZSTD:
-            return _ZSTD_DECOMPRESSOR.decompress(data)
+            return _ZSTD_DECOMPRESSOR.decompress(data), True
         if comp_type == Compression_Type.LZ4:
-            return lz4block.decompress(data)
+            return lz4block.decompress(data), True
     except Exception:
         pass
 
-    return data
+    return b"", False
+
+
+def decompress_payload(data: bytes, comp_type: int) -> bytes:
+    """Backward-compatible decompression helper."""
+    out, ok = try_decompress_payload(data, comp_type)
+    return out if ok else data

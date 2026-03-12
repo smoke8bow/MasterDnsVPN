@@ -30,7 +30,7 @@ from dns_utils.compression import (
     normalize_compression_type,
     get_compression_name,
     compress_payload,
-    decompress_payload,
+    try_decompress_payload,
 )
 
 # Ensure UTF-8 output for consistent logging
@@ -2248,14 +2248,15 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     if not packed_any:
                         break
 
-                item = (
-                    item[0],
-                    item[1],
-                    Packet_Type.PACKED_CONTROL_BLOCKS,
-                    0,
-                    0,
-                    bytes(packed_buffer),
-                )
+                if blocks > 1:
+                    item = (
+                        item[0],
+                        item[1],
+                        Packet_Type.PACKED_CONTROL_BLOCKS,
+                        0,
+                        0,
+                        bytes(packed_buffer),
+                    )
 
             if not item:
                 continue
@@ -2378,7 +2379,10 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 or Compression_Type.OFF
             )
             if comp_type != Compression_Type.OFF:
-                data = decompress_payload(data, comp_type)
+                data, ok = try_decompress_payload(data, comp_type)
+                if not ok:
+                    # Invalid/mismatched compressed payload; drop packet to avoid parser churn.
+                    return
 
         stream_id = header.get("stream_id", 0)
         sn = header.get("sequence_num", 0)
@@ -2686,6 +2690,9 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
                         elif (
                             stream_obj
+                            and not getattr(
+                                stream_obj, "enable_control_reliability", False
+                            )
                             and getattr(stream_obj, "_rst_sent", False)
                             and not getattr(stream_obj, "_rst_acked", False)
                             and (now - last_act) > 1.5
@@ -2705,7 +2712,15 @@ class MasterDnsVPNClient(PacketQueueMixin):
                                 )
 
                         elif (
-                            not (stream_obj and getattr(stream_obj, "_rst_sent", False))
+                            not (
+                                stream_obj
+                                and getattr(
+                                    stream_obj, "enable_control_reliability", False
+                                )
+                            )
+                            and not (
+                                stream_obj and getattr(stream_obj, "_rst_sent", False)
+                            )
                             and not (
                                 stream_obj
                                 and getattr(stream_obj, "_rst_received", False)

@@ -177,6 +177,8 @@ class ARQ:
 
         self._control_ack_map = dict(self.CONTROL_ACK_PAIRS)
         self._control_reverse_ack_map = {v: k for k, v in self._control_ack_map.items()}
+        self._last_dup_ack_sn: Optional[int] = None
+        self._last_dup_ack_time: float = 0.0
 
         try:
             sock = writer.get_extra_info("socket")
@@ -520,12 +522,20 @@ class ARQ:
         if self.closed or self.is_reset():
             return
 
-        self.last_activity = time.monotonic()
+        now = time.monotonic()
+        self.last_activity = now
         sn = self._norm_sn(sn)
 
         diff = (sn - self.rcv_nxt) % 65536
         if diff >= 32768:
-            await self.enqueue_tx(0, self.stream_id, sn, b"", is_ack=True)
+            ack_throttle = max(0.05, min(self.rto, 0.3))
+            if not (
+                self._last_dup_ack_sn == sn
+                and (now - self._last_dup_ack_time) < ack_throttle
+            ):
+                self._last_dup_ack_sn = sn
+                self._last_dup_ack_time = now
+                await self.enqueue_tx(0, self.stream_id, sn, b"", is_ack=True)
             return
 
         if diff > self.window_size:
