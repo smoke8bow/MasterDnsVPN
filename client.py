@@ -18,6 +18,7 @@ from typing import Optional, Tuple
 from dns_utils import ARQ, DNSBalancer, DnsPacketParser, PingManager, PrependReader
 from dns_utils.config_loader import get_config_path, load_config
 from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
+from dns_utils.PacketQueueMixin import PacketQueueMixin
 from dns_utils.utils import (
     async_recvfrom,
     async_sendto,
@@ -33,7 +34,7 @@ except Exception:
     pass
 
 
-class MasterDnsVPNClient:
+class MasterDnsVPNClient(PacketQueueMixin):
     """MasterDnsVPN Client class to handle DNS requests over UDP."""
 
     def __init__(self) -> None:
@@ -1495,81 +1496,6 @@ class MasterDnsVPNClient:
             stream_id += 1
 
         return False, 0
-
-    def _inc_priority_counter(self, owner: dict, priority: int) -> None:
-        counters = owner.setdefault("priority_counts", {})
-        p = int(priority)
-        counters[p] = counters.get(p, 0) + 1
-
-    def _dec_priority_counter(self, owner: dict, priority: int) -> None:
-        counters = owner.get("priority_counts")
-        if not counters:
-            return
-        p = int(priority)
-        cur = counters.get(p, 0)
-        if cur <= 1:
-            counters.pop(p, None)
-        else:
-            counters[p] = cur - 1
-
-    def _release_tracking_on_pop(self, owner: dict, packet_type: int, sn: int) -> None:
-        ptype = int(packet_type)
-        if ptype in (Packet_Type.STREAM_DATA, Packet_Type.SOCKS5_SYN):
-            owner.get("track_data", set()).discard(sn)
-        elif ptype == Packet_Type.STREAM_DATA_ACK:
-            owner.get("track_ack", set()).discard(sn)
-        elif ptype == Packet_Type.STREAM_RESEND:
-            owner.get("track_resend", set()).discard(sn)
-        elif ptype == Packet_Type.STREAM_FIN:
-            owner.get("track_fin", set()).discard(ptype)
-            owner.get("track_types", set()).discard(ptype)
-        elif ptype in (
-            Packet_Type.STREAM_SYN,
-            Packet_Type.STREAM_SYN_ACK,
-            Packet_Type.SOCKS5_SYN_ACK,
-        ):
-            owner.get("track_syn_ack", set()).discard(ptype)
-            owner.get("track_types", set()).discard(ptype)
-
-    def _on_queue_pop(self, owner: dict, queue_item: tuple) -> None:
-        priority, _, ptype, _, sn, _ = queue_item
-        self._dec_priority_counter(owner, priority)
-        self._release_tracking_on_pop(owner, ptype, sn)
-
-    def _pop_packable_control_block(self, queue, owner: dict, priority: int):
-        if not queue:
-            return None
-        item = queue[0]
-        if int(item[0]) != int(priority):
-            return None
-        ptype = int(item[2])
-        payload = item[5]
-        if ptype not in self._packable_control_types or payload:
-            return None
-        popped = heapq.heappop(queue)
-        self._on_queue_pop(owner, popped)
-        return popped
-
-    def _resolve_arq_packet_type(self, **flags) -> int:
-        if flags.get("is_ack"):
-            return Packet_Type.STREAM_DATA_ACK
-        if flags.get("is_fin"):
-            return Packet_Type.STREAM_FIN
-        if flags.get("is_fin_ack"):
-            return Packet_Type.STREAM_FIN_ACK
-        if flags.get("is_rst"):
-            return Packet_Type.STREAM_RST
-        if flags.get("is_rst_ack"):
-            return Packet_Type.STREAM_RST_ACK
-        if flags.get("is_syn_ack"):
-            return Packet_Type.STREAM_SYN_ACK
-        if flags.get("is_socks_syn_ack"):
-            return Packet_Type.SOCKS5_SYN_ACK
-        if flags.get("is_socks_syn"):
-            return Packet_Type.SOCKS5_SYN
-        if flags.get("is_resend"):
-            return Packet_Type.STREAM_RESEND
-        return Packet_Type.STREAM_DATA
 
     def _is_socks5_error_packet(self, packet_type: int) -> bool:
         return int(packet_type) in self._socks5_error_reply_map
