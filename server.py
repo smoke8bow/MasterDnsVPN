@@ -203,6 +203,11 @@ class MasterDnsVPNServer(PacketQueueMixin):
             for k, v in Packet_Type.__dict__.items()
             if not k.startswith("__") and isinstance(v, int)
         }
+        self._packet_type_names = {
+            v: k
+            for k, v in Packet_Type.__dict__.items()
+            if not k.startswith("__") and isinstance(v, int)
+        }
 
         self._pre_session_packet_types = {
             Packet_Type.SESSION_INIT,
@@ -1041,6 +1046,11 @@ class MasterDnsVPNServer(PacketQueueMixin):
     ) -> None:
         """Queue SOCKS5 error packet for client."""
         payload = b""
+        packet_name = self._packet_type_names.get(int(packet_type), str(packet_type))
+        self.logger.debug(
+            f"<yellow>Queueing SOCKS5 error <cyan>{packet_name}</cyan> for session "
+            f"<cyan>{session_id}</cyan> stream <cyan>{stream_id}</cyan></yellow>"
+        )
         await self._queue_and_cache_response(
             session_id,
             stream_id,

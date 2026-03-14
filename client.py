@@ -333,6 +333,11 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 Packet_Type.STREAM_RST,
             }
         )
+        self._packet_type_names = {
+            v: k
+            for k, v in Packet_Type.__dict__.items()
+            if not k.startswith("__") and isinstance(v, int)
+        }
         self._socks5_error_reply_map = {
             Packet_Type.SOCKS5_CONNECT_FAIL: 0x01,
             Packet_Type.SOCKS5_RULESET_DENIED: 0x02,
@@ -2822,7 +2827,12 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
                 socks_err_ptype = stream_data.get("socks_error_packet")
                 if socks_err_ptype is not None:
-                    raise ConnectionError(f"SOCKS handshake failed ({socks_err_ptype})")
+                    packet_name = self._packet_type_names.get(
+                        int(socks_err_ptype), str(socks_err_ptype)
+                    )
+                    raise ConnectionError(
+                        f"SOCKS handshake failed ({packet_name})"
+                    )
 
                 if stream_data.get("status") == "ACTIVE":
                     if writer and not writer.is_closing():
