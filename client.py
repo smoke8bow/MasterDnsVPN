@@ -360,7 +360,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
 
     def _load_resolvers_from_file(self) -> list:
-        """Load resolver IP addresses from client_resolvers.txt."""
+        """Load resolver IP addresses or CIDR ranges from client_resolvers.txt."""
         resolver_file = get_config_path("client_resolvers.txt")
         if not os.path.isfile(resolver_file):
             self.logger.error(
@@ -372,6 +372,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         resolvers = []
         seen = set()
+        max_cidr_hosts = 65536
         try:
             with open(resolver_file, "r", encoding="utf-8") as f:
                 for raw_line in f:
@@ -379,8 +380,39 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     if not line or line.startswith("#"):
                         continue
                     try:
+                        if "/" in line:
+                            network = ipaddress.ip_network(line, strict=False)
+                            usable_hosts = network.num_addresses
+                            if network.version == 4 and network.prefixlen < 31:
+                                usable_hosts = max(0, usable_hosts - 2)
+                            elif network.version == 6 and network.prefixlen < 127:
+                                usable_hosts = max(0, usable_hosts - 1)
+
+                            if usable_hosts > max_cidr_hosts:
+                                self.logger.warning(
+                                    f"Resolver subnet '<yellow>{line}</yellow>' expands to <cyan>{usable_hosts}</cyan> hosts; maximum supported is <cyan>{max_cidr_hosts}</cyan>. Ignored."
+                                )
+                                continue
+
+                            expanded_count = 0
+                            for host_ip in network.hosts():
+                                normalized_ip = str(host_ip)
+                                if normalized_ip in seen:
+                                    continue
+                                seen.add(normalized_ip)
+                                resolvers.append(normalized_ip)
+                                expanded_count += 1
+
+                            self.logger.debug(
+                                f"Expanded resolver subnet '<cyan>{line}</cyan>' to <cyan>{expanded_count}</cyan> IPs."
+                            )
+                            continue
+
                         normalized_ip = str(ipaddress.ip_address(line))
                     except ValueError:
+                        self.logger.warning(
+                            f"Invalid resolver IP/subnet '<yellow>{line}</yellow>' ignored."
+                        )
                         continue
                     if normalized_ip in seen:
                         continue
@@ -395,9 +427,11 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         if not resolvers:
             self.logger.error(
-                "No valid resolver IP found in '<cyan>client_resolvers.txt</cyan>'."
+                "No valid resolver IP/subnet found in '<cyan>client_resolvers.txt</cyan>'."
             )
-            self.logger.error("Add at least one valid IPv4/IPv6 per line and restart.")
+            self.logger.error(
+                "Add at least one valid IP or CIDR range per line and restart."
+            )
             self._prompt_before_exit()
             sys.exit(1)
 
