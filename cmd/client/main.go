@@ -17,7 +17,7 @@ import (
 func main() {
 	app, err := client.Bootstrap("client_config.toml")
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Client startup failed: %v\n", err)
+		_, _ = os.Stderr.WriteString(fmt.Sprintf("Client startup failed: %v\n", err))
 		os.Exit(1)
 	}
 
@@ -51,7 +51,7 @@ func main() {
 	)
 
 	if err := app.RunInitialMTUTests(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Initial MTU testing failed: %v\n", err)
+		_, _ = os.Stderr.WriteString(fmt.Sprintf("Initial MTU testing failed: %v\n", err))
 		os.Exit(1)
 	}
 

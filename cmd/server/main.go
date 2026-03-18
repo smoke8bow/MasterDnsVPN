@@ -28,7 +28,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logger.New("MasterDnsVPN Go Server", cfg.LogLevel)
+	log := logger.New("MasterDnsVPN Server", cfg.LogLevel)
 	keyInfo, err := security.EnsureServerEncryptionKey(cfg)
 	if err != nil {
 		log.Errorf("❌ <red>Encryption Key Setup Failed</red> <magenta>|</magenta> <cyan>%v</cyan>", err)
@@ -48,14 +48,15 @@ func main() {
 
 	log.Infof("🚀 <green>Server Configuration Loaded</green>")
 	log.Infof(
-		"🛰️ <green>Listener</green> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Readers</blue>: <magenta>%d</magenta> <magenta>|</magenta> <blue>Workers</blue>: <magenta>%d</magenta>",
+		"🛰️ <green>Listener</green> <magenta>|</magenta> <green>Addr: </green><cyan>%s</cyan> <magenta>|</magenta> <green>Readers:</green> <cyan>%d</cyan> <magenta>|</magenta> <green>Workers:</green> <cyan>%d</cyan>",
 		cfg.Address(),
 		cfg.UDPReaders,
 		cfg.DNSRequestWorkers,
 	)
+
 	if len(cfg.Domain) > 0 {
 		log.Infof(
-			"🌐 <green>Allowed Domains</green> <magenta>|</magenta> <cyan>%s</cyan> <magenta>|</magenta> <blue>Min Label</blue>: <magenta>%d</magenta>",
+			"🌐 <green>Allowed Domains</green> <magenta>|</magenta> <cyan>%s</cyan> <magenta>|</magenta> <green>Min Label:</green> <cyan>%d</cyan>",
 			strings.Join(cfg.Domain, ", "),
 			cfg.MinVPNLabelLength,
 		)
@@ -65,7 +66,7 @@ func main() {
 		)
 	}
 	log.Infof(
-		"🔐 <green>Encryption</green> <magenta>|</magenta> <blue>Method</blue>: <cyan>%s</cyan> <gray>(id=%d)</gray>",
+		"🔐 <green>Encryption</green> <magenta>|</magenta> <green>Method:</green> <cyan>%s</cyan> <gray>(id=%d)</gray>",
 		keyInfo.MethodName,
 		keyInfo.MethodID,
 	)

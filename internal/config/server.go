@@ -36,21 +36,9 @@ type ServerConfig struct {
 }
 
 func defaultServerConfig() ServerConfig {
-	workers := runtime.NumCPU()
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > 16 {
-		workers = 16
-	}
+	workers := min(max(runtime.NumCPU(), 1), 16)
 
-	readers := runtime.NumCPU() / 2
-	if readers < 1 {
-		readers = 1
-	}
-	if readers > 4 {
-		readers = 4
-	}
+	readers := min(max(runtime.NumCPU()/2, 1), 4)
 
 	return ServerConfig{
 		UDPHost:               "0.0.0.0",
@@ -90,36 +78,47 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if cfg.UDPHost == "" {
 		cfg.UDPHost = "0.0.0.0"
 	}
+
 	if cfg.UDPPort <= 0 || cfg.UDPPort > 65535 {
 		return cfg, fmt.Errorf("invalid UDP_PORT: %d", cfg.UDPPort)
 	}
+
 	if cfg.UDPReaders <= 0 {
 		cfg.UDPReaders = defaultServerConfig().UDPReaders
 	}
+
 	if cfg.SocketBufferSize <= 0 {
 		cfg.SocketBufferSize = 8 * 1024 * 1024
 	}
+
 	if cfg.MaxConcurrentRequests <= 0 {
 		cfg.MaxConcurrentRequests = 4096
 	}
+
 	if cfg.DNSRequestWorkers <= 0 {
 		cfg.DNSRequestWorkers = defaultServerConfig().DNSRequestWorkers
 	}
+
 	if cfg.MaxPacketSize <= 0 {
 		cfg.MaxPacketSize = 65535
 	}
+
 	if cfg.DropLogIntervalSecs <= 0 {
 		cfg.DropLogIntervalSecs = 2.0
 	}
+
 	if cfg.MinVPNLabelLength <= 0 {
 		cfg.MinVPNLabelLength = 3
 	}
+
 	if cfg.DataEncryptionMethod < 0 || cfg.DataEncryptionMethod > 5 {
 		cfg.DataEncryptionMethod = 1
 	}
+
 	if cfg.EncryptionKeyFile == "" {
 		cfg.EncryptionKeyFile = "encrypt_key.txt"
 	}
+
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "INFO"
 	}
