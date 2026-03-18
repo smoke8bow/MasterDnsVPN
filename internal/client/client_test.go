@@ -527,6 +527,92 @@ func TestDispatchDNSQueryDoesNotCacheServerFailures(t *testing.T) {
 	}
 }
 
+func TestDispatchDNSQuerySplitsLargePayloadAcrossFragments(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	c := New(config.ClientConfig{
+		LocalDNSPendingTimeoutSec: 5,
+	}, nil, codec)
+	c.connections = []Connection{{
+		Domain:        "v.example.com",
+		Resolver:      "127.0.0.1",
+		ResolverPort:  5353,
+		ResolverLabel: "127.0.0.1:5353",
+		Key:           "127.0.0.1|5353|v.example.com",
+		IsValid:       true,
+	}}
+	c.connectionsByKey = map[string]int{c.connections[0].Key: 0}
+	c.rebuildBalancer()
+	c.sessionID = 7
+	c.sessionCookie = 9
+	c.syncedUploadMTU = 20
+
+	rawQuery := buildClientTestDNSQuery(0x1234, "example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN)
+	serverFailure, err := DnsParser.BuildServerFailureResponse(rawQuery)
+	if err != nil {
+		t.Fatalf("BuildServerFailureResponse returned error: %v", err)
+	}
+
+	seenFragments := make([]uint8, 0, 4)
+	seenTotals := make([]uint8, 0, 4)
+	seenSeq := uint16(0)
+	c.exchangeQueryFn = func(conn Connection, packet []byte, timeout time.Duration) ([]byte, error) {
+		queryPacket, err := DnsParser.ParsePacketLite(packet)
+		if err != nil || !queryPacket.HasQuestion {
+			t.Fatalf("unexpected tunnel dns query: err=%v", err)
+		}
+		vpnPacket, err := VpnProto.ParseFromLabels(extractTestTunnelLabels(queryPacket.FirstQuestion.Name, "v.example.com"), c.codec)
+		if err != nil {
+			t.Fatalf("ParseFromLabels returned error: %v", err)
+		}
+		seenFragments = append(seenFragments, vpnPacket.FragmentID)
+		seenTotals = append(seenTotals, vpnPacket.TotalFragments)
+		if seenSeq == 0 {
+			seenSeq = vpnPacket.SequenceNum
+		} else if vpnPacket.SequenceNum != seenSeq {
+			t.Fatalf("fragment sequence mismatch: got=%d want=%d", vpnPacket.SequenceNum, seenSeq)
+		}
+
+		if vpnPacket.FragmentID+1 < vpnPacket.TotalFragments {
+			return DnsParser.BuildEmptyNoErrorResponse(packet)
+		}
+
+		return DnsParser.BuildVPNResponsePacket(packet, queryPacket.FirstQuestion.Name, VpnProto.Packet{
+			SessionID:      c.sessionID,
+			SessionCookie:  c.sessionCookie,
+			PacketType:     Enums.PACKET_DNS_QUERY_RES,
+			StreamID:       0,
+			SequenceNum:    vpnPacket.SequenceNum,
+			FragmentID:     0,
+			TotalFragments: 1,
+			Payload:        serverFailure,
+		}, false)
+	}
+
+	request := &dnsDispatchRequest{
+		CacheKey: dnscache.BuildKey("example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN),
+		Query:    rawQuery,
+		Domain:   "example.com",
+		QType:    Enums.DNS_RECORD_TYPE_A,
+		QClass:   Enums.DNSQ_CLASS_IN,
+	}
+
+	if _, err := c.dispatchDNSQuery(request); err != nil {
+		t.Fatalf("dispatchDNSQuery returned error: %v", err)
+	}
+	if len(seenFragments) < 2 {
+		t.Fatalf("expected multiple fragments, got=%d", len(seenFragments))
+	}
+	for i, total := range seenTotals {
+		if total != seenTotals[0] {
+			t.Fatalf("fragment total mismatch at %d: got=%d want=%d", i, total, seenTotals[0])
+		}
+	}
+}
+
 func TestDispatchDNSQueryFailsWithoutValidConnections(t *testing.T) {
 	codec, err := security.NewCodec(0, "")
 	if err != nil {

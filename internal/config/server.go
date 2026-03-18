@@ -36,6 +36,11 @@ type ServerConfig struct {
 	SessionCleanupIntervalSecs        float64  `toml:"SESSION_CLEANUP_INTERVAL_SECONDS"`
 	ClosedSessionRetentionSecs        float64  `toml:"CLOSED_SESSION_RETENTION_SECONDS"`
 	MaxPacketsPerBatch                int      `toml:"MAX_PACKETS_PER_BATCH"`
+	DNSUpstreamServers                []string `toml:"DNS_UPSTREAM_SERVERS"`
+	DNSUpstreamTimeoutSecs            float64  `toml:"DNS_UPSTREAM_TIMEOUT"`
+	DNSFragmentAssemblyTimeoutSecs    float64  `toml:"DNS_FRAGMENT_ASSEMBLY_TIMEOUT"`
+	DNSCacheMaxRecords                int      `toml:"DNS_CACHE_MAX_RECORDS"`
+	DNSCacheTTLSeconds                float64  `toml:"DNS_CACHE_TTL_SECONDS"`
 	Domain                            []string `toml:"DOMAIN"`
 	MinVPNLabelLength                 int      `toml:"MIN_VPN_LABEL_LENGTH"`
 	SupportedUploadCompressionTypes   []int    `toml:"SUPPORTED_UPLOAD_COMPRESSION_TYPES"`
@@ -65,6 +70,11 @@ func defaultServerConfig() ServerConfig {
 		SessionCleanupIntervalSecs:        30.0,
 		ClosedSessionRetentionSecs:        600.0,
 		MaxPacketsPerBatch:                20,
+		DNSUpstreamServers:                []string{"1.1.1.1:53"},
+		DNSUpstreamTimeoutSecs:            4.0,
+		DNSFragmentAssemblyTimeoutSecs:    16.0,
+		DNSCacheMaxRecords:                2000,
+		DNSCacheTTLSeconds:                3600.0,
 		Domain:                            nil,
 		MinVPNLabelLength:                 3,
 		SupportedUploadCompressionTypes:   []int{0, 3},
@@ -142,6 +152,21 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if cfg.MaxPacketsPerBatch < 1 {
 		cfg.MaxPacketsPerBatch = 20
 	}
+	if len(cfg.DNSUpstreamServers) == 0 {
+		cfg.DNSUpstreamServers = []string{"1.1.1.1:53"}
+	}
+	if cfg.DNSUpstreamTimeoutSecs <= 0 {
+		cfg.DNSUpstreamTimeoutSecs = 4.0
+	}
+	if cfg.DNSFragmentAssemblyTimeoutSecs <= 0 {
+		cfg.DNSFragmentAssemblyTimeoutSecs = max(10.0, cfg.DNSUpstreamTimeoutSecs*4.0)
+	}
+	if cfg.DNSCacheMaxRecords < 1 {
+		cfg.DNSCacheMaxRecords = 2000
+	}
+	if cfg.DNSCacheTTLSeconds <= 0 {
+		cfg.DNSCacheTTLSeconds = 3600.0
+	}
 
 	if cfg.MinVPNLabelLength <= 0 {
 		cfg.MinVPNLabelLength = 3
@@ -186,6 +211,14 @@ func (c ServerConfig) SessionCleanupInterval() time.Duration {
 
 func (c ServerConfig) ClosedSessionRetention() time.Duration {
 	return time.Duration(c.ClosedSessionRetentionSecs * float64(time.Second))
+}
+
+func (c ServerConfig) DNSUpstreamTimeout() time.Duration {
+	return time.Duration(c.DNSUpstreamTimeoutSecs * float64(time.Second))
+}
+
+func (c ServerConfig) DNSFragmentAssemblyTimeout() time.Duration {
+	return time.Duration(c.DNSFragmentAssemblyTimeoutSecs * float64(time.Second))
 }
 
 func (c ServerConfig) EncryptionKeyPath() string {

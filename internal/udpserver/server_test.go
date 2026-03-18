@@ -577,6 +577,9 @@ func TestHandlePacketRespondsToDNSQueryRequest(t *testing.T) {
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
 	}, nil, codec)
+	srv.resolveDNSQueryFn = func(rawQuery []byte) ([]byte, error) {
+		return DnsParser.BuildServerFailureResponse(rawQuery)
+	}
 
 	verifyCode := []byte{0x12, 0x34, 0x56, 0x78}
 	initPayload := []byte{
@@ -626,6 +629,125 @@ func TestHandlePacketRespondsToDNSQueryRequest(t *testing.T) {
 	}
 	if dnsResponse.FirstQuestion.Name != "example.com" {
 		t.Fatalf("unexpected dns qname: got=%q", dnsResponse.FirstQuestion.Name)
+	}
+}
+
+func TestHandlePacketAssemblesFragmentedDNSQueryRequest(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:     65535,
+		Domain:            []string{"a.com"},
+		MinVPNLabelLength: 3,
+	}, nil, codec)
+
+	rawQuery := buildServerTestQuery(0x5555, "example.com", Enums.DNS_RECORD_TYPE_A)
+	var upstreamCalls int
+	srv.resolveDNSQueryFn = func(query []byte) ([]byte, error) {
+		upstreamCalls++
+		if string(query) != string(rawQuery) {
+			t.Fatal("unexpected assembled dns query")
+		}
+		return DnsParser.BuildServerFailureResponse(query)
+	}
+
+	verifyCode := []byte{0x12, 0x34, 0x56, 0x78}
+	initPayload := []byte{
+		0,
+		0x00,
+		0x00, 0x96,
+		0x00, 0xC8,
+		verifyCode[0], verifyCode[1], verifyCode[2], verifyCode[3],
+	}
+	initResponse := srv.handlePacket(buildTunnelQueryWithSessionID(t, codec, "a.com", 0, Enums.PACKET_SESSION_INIT, initPayload))
+	packet, err := DnsParser.ExtractVPNResponse(initResponse, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+
+	sessionID := packet.Payload[0]
+	sessionCookie := packet.Payload[1]
+	fragment0 := rawQuery[:len(rawQuery)/2]
+	fragment1 := rawQuery[len(rawQuery)/2:]
+
+	firstQuery := buildTunnelDNSQueryFragment(t, codec, "a.com", sessionID, sessionCookie, 19, 0, 2, fragment0)
+	firstResponse := srv.handlePacket(firstQuery)
+	if len(firstResponse) == 0 {
+		t.Fatal("expected placeholder dns response for first fragment")
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream should not be called before final fragment, got=%d", upstreamCalls)
+	}
+
+	secondQuery := buildTunnelDNSQueryFragment(t, codec, "a.com", sessionID, sessionCookie, 19, 1, 2, fragment1)
+	secondResponse := srv.handlePacket(secondQuery)
+	if len(secondResponse) == 0 {
+		t.Fatal("expected dns response packet for final fragment")
+	}
+	if upstreamCalls != 1 {
+		t.Fatalf("unexpected upstream call count: got=%d want=1", upstreamCalls)
+	}
+
+	vpnResponse, err := DnsParser.ExtractVPNResponse(secondResponse, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	if vpnResponse.PacketType != Enums.PACKET_DNS_QUERY_RES {
+		t.Fatalf("unexpected packet type: got=%d want=%d", vpnResponse.PacketType, Enums.PACKET_DNS_QUERY_RES)
+	}
+}
+
+func TestHandlePacketCachesUpstreamDNSResponse(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:      65535,
+		Domain:             []string{"a.com"},
+		MinVPNLabelLength:  3,
+		DNSCacheMaxRecords: 8,
+		DNSCacheTTLSeconds: 60,
+	}, nil, codec)
+
+	rawQuery := buildServerTestQuery(0x1111, "example.com", Enums.DNS_RECORD_TYPE_A)
+	var upstreamCalls int
+	srv.resolveDNSQueryFn = func(query []byte) ([]byte, error) {
+		upstreamCalls++
+		return DnsParser.BuildServerFailureResponse(query)
+	}
+
+	verifyCode := []byte{0x12, 0x34, 0x56, 0x78}
+	initPayload := []byte{
+		0,
+		0x00,
+		0x00, 0x96,
+		0x00, 0xC8,
+		verifyCode[0], verifyCode[1], verifyCode[2], verifyCode[3],
+	}
+	initResponse := srv.handlePacket(buildTunnelQueryWithSessionID(t, codec, "a.com", 0, Enums.PACKET_SESSION_INIT, initPayload))
+	packet, err := DnsParser.ExtractVPNResponse(initResponse, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+
+	sessionID := packet.Payload[0]
+	sessionCookie := packet.Payload[1]
+	query1 := buildTunnelDNSQuery(t, codec, "a.com", sessionID, sessionCookie, 21, rawQuery)
+	query2 := buildTunnelDNSQuery(t, codec, "a.com", sessionID, sessionCookie, 22, rawQuery)
+
+	if response := srv.handlePacket(query1); len(response) == 0 {
+		t.Fatal("expected dns response packet")
+	}
+	if response := srv.handlePacket(query2); len(response) == 0 {
+		t.Fatal("expected cached dns response packet")
+	}
+	if upstreamCalls != 1 {
+		t.Fatalf("expected cached second response, got upstreamCalls=%d", upstreamCalls)
 	}
 }
 
@@ -694,6 +816,10 @@ func buildTunnelQueryWithCookie(t *testing.T, codec *security.Codec, name string
 }
 
 func buildTunnelDNSQuery(t *testing.T, codec *security.Codec, name string, sessionID uint8, sessionCookie uint8, sequenceNum uint16, payload []byte) []byte {
+	return buildTunnelDNSQueryFragment(t, codec, name, sessionID, sessionCookie, sequenceNum, 0, 1, payload)
+}
+
+func buildTunnelDNSQueryFragment(t *testing.T, codec *security.Codec, name string, sessionID uint8, sessionCookie uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, payload []byte) []byte {
 	t.Helper()
 
 	encoded, err := VpnProto.BuildEncodedAuto(VpnProto.BuildOptions{
@@ -702,8 +828,8 @@ func buildTunnelDNSQuery(t *testing.T, codec *security.Codec, name string, sessi
 		SessionCookie:   sessionCookie,
 		StreamID:        0,
 		SequenceNum:     sequenceNum,
-		FragmentID:      0,
-		TotalFragments:  1,
+		FragmentID:      fragmentID,
+		TotalFragments:  totalFragments,
 		CompressionType: 0,
 		Payload:         payload,
 	}, codec, 100)

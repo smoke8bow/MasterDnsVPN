@@ -20,13 +20,18 @@ import (
 
 var ErrTunnelDNSDispatchFailed = errors.New("dns tunnel dispatch failed")
 
-func (c *Client) dispatchDNSQuery(request *dnsDispatchRequest) ([]byte, error) {
+func (c *Client) dispatchDNSQuery(request *dnsDispatchRequest) (response []byte, err error) {
 	if c == nil || request == nil || len(request.Query) == 0 {
 		return nil, ErrTunnelDNSDispatchFailed
 	}
 	if c.sessionID == 0 {
 		return nil, ErrSessionInitFailed
 	}
+	defer func() {
+		if err != nil {
+			c.dnsInflight.Complete(request.CacheKey)
+		}
+	}()
 
 	packet, err := c.exchangeMainStreamPacket(Enums.PACKET_DNS_QUERY_REQ, request.Query)
 	if err != nil {
@@ -70,44 +75,62 @@ func (c *Client) exchangeMainStreamPacket(packetType uint8, payload []byte) (Vpn
 	sequenceNum := c.nextMainSequence()
 	lastErr := ErrTunnelDNSDispatchFailed
 	for _, connection := range connections {
-		query, err := c.buildMainStreamQuery(connection.Domain, packetType, sequenceNum, payload)
-		if err != nil {
-			c.SetConnectionValidity(connection.Key, false)
-			lastErr = err
-			continue
+		packet, err := c.exchangeMainStreamPacketWithConnection(connection, packetType, sequenceNum, payload, timeout)
+		if err == nil {
+			return packet, nil
 		}
-
-		response, err := c.exchangeDNSOverConnection(connection, query, timeout)
-		if err != nil {
-			c.SetConnectionValidity(connection.Key, false)
-			lastErr = err
-			continue
-		}
-
-		packet, err := DnsParser.ExtractVPNResponse(response, c.responseMode == mtuProbeBase64Reply)
-		if err != nil || !c.validateServerPacket(packet) {
-			lastErr = ErrTunnelDNSDispatchFailed
-			continue
-		}
-		if packet.StreamID != 0 || packet.SequenceNum != sequenceNum {
-			lastErr = ErrTunnelDNSDispatchFailed
-			continue
-		}
-		return packet, nil
+		c.SetConnectionValidity(connection.Key, false)
+		lastErr = err
 	}
 
 	return VpnProto.Packet{}, lastErr
 }
 
-func (c *Client) buildMainStreamQuery(domain string, packetType uint8, sequenceNum uint16, payload []byte) ([]byte, error) {
+func (c *Client) exchangeMainStreamPacketWithConnection(connection Connection, packetType uint8, sequenceNum uint16, payload []byte, timeout time.Duration) (VpnProto.Packet, error) {
+	fragments := c.fragmentMainStreamPayload(payload)
+	for fragmentID, fragmentPayload := range fragments {
+		query, err := c.buildMainStreamQuery(
+			connection.Domain,
+			packetType,
+			sequenceNum,
+			uint8(fragmentID),
+			uint8(len(fragments)),
+			fragmentPayload,
+		)
+		if err != nil {
+			return VpnProto.Packet{}, err
+		}
+
+		response, err := c.exchangeDNSOverConnection(connection, query, timeout)
+		if err != nil {
+			return VpnProto.Packet{}, err
+		}
+		if fragmentID < len(fragments)-1 {
+			continue
+		}
+
+		packet, err := DnsParser.ExtractVPNResponse(response, c.responseMode == mtuProbeBase64Reply)
+		if err != nil || !c.validateServerPacket(packet) {
+			return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
+		}
+		if packet.StreamID != 0 || packet.SequenceNum != sequenceNum {
+			return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
+		}
+		return packet, nil
+	}
+
+	return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
+}
+
+func (c *Client) buildMainStreamQuery(domain string, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, payload []byte) ([]byte, error) {
 	encoded, err := VpnProto.BuildEncodedAuto(VpnProto.BuildOptions{
 		SessionID:       c.sessionID,
 		PacketType:      packetType,
 		SessionCookie:   c.sessionCookie,
 		StreamID:        0,
 		SequenceNum:     sequenceNum,
-		FragmentID:      0,
-		TotalFragments:  1,
+		FragmentID:      fragmentID,
+		TotalFragments:  totalFragments,
 		CompressionType: c.uploadCompression,
 		Payload:         payload,
 	}, c.codec, c.cfg.CompressionMinSize)
@@ -120,6 +143,38 @@ func (c *Client) buildMainStreamQuery(domain string, packetType uint8, sequenceN
 		return nil, err
 	}
 	return DnsParser.BuildTXTQuestionPacket(name, Enums.DNS_RECORD_TYPE_TXT, EDnsSafeUDPSize)
+}
+
+func (c *Client) fragmentMainStreamPayload(payload []byte) [][]byte {
+	if len(payload) == 0 {
+		return [][]byte{{}}
+	}
+
+	limit := c.syncedUploadMTU
+	if limit <= 0 {
+		limit = EDnsSafeUDPSize
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if len(payload) <= limit {
+		return [][]byte{payload}
+	}
+
+	total := (len(payload) + limit - 1) / limit
+	if total > 255 {
+		total = 255
+	}
+
+	fragments := make([][]byte, 0, total)
+	for start := 0; start < len(payload) && len(fragments) < total; start += limit {
+		end := start + limit
+		if end > len(payload) {
+			end = len(payload)
+		}
+		fragments = append(fragments, payload[start:end])
+	}
+	return fragments
 }
 
 func (c *Client) exchangeDNSOverConnection(connection Connection, packet []byte, timeout time.Duration) ([]byte, error) {

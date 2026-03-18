@@ -19,6 +19,7 @@ import (
 
 	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
+	"masterdnsvpn-go/internal/dnscache"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	"masterdnsvpn-go/internal/domainmatcher"
 	Enums "masterdnsvpn-go/internal/enums"
@@ -42,6 +43,11 @@ type Server struct {
 	domainMatcher           *domainmatcher.Matcher
 	sessions                *sessionStore
 	invalidCookieTracker    *invalidCookieTracker
+	dnsCache                *dnscache.Store
+	dnsUpstreamServers      []string
+	dnsFragmentMu           sync.Mutex
+	dnsFragments            map[dnsFragmentKey]*dnsFragmentEntry
+	resolveDNSQueryFn       func([]byte) ([]byte, error)
 	uploadCompressionMask   uint8
 	downloadCompressionMask uint8
 	packetPool              sync.Pool
@@ -57,12 +63,19 @@ type request struct {
 
 func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Server {
 	return &Server{
-		cfg:                     cfg,
-		log:                     log,
-		codec:                   codec,
-		domainMatcher:           domainmatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
-		sessions:                newSessionStore(),
-		invalidCookieTracker:    newInvalidCookieTracker(),
+		cfg:                  cfg,
+		log:                  log,
+		codec:                codec,
+		domainMatcher:        domainmatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
+		sessions:             newSessionStore(),
+		invalidCookieTracker: newInvalidCookieTracker(),
+		dnsCache: dnscache.New(
+			cfg.DNSCacheMaxRecords,
+			time.Duration(cfg.DNSCacheTTLSeconds*float64(time.Second)),
+			cfg.DNSFragmentAssemblyTimeout(),
+		),
+		dnsUpstreamServers:      append([]string(nil), cfg.DNSUpstreamServers...),
+		dnsFragments:            make(map[dnsFragmentKey]*dnsFragmentEntry, 32),
 		uploadCompressionMask:   buildCompressionMask(cfg.SupportedUploadCompressionTypes),
 		downloadCompressionMask: buildCompressionMask(cfg.SupportedDownloadCompressionTypes),
 		packetPool: sync.Pool{
@@ -172,6 +185,7 @@ func (s *Server) sessionCleanupLoop(ctx context.Context) {
 		case now := <-ticker.C:
 			expired := s.sessions.Cleanup(now, s.cfg.SessionTimeout(), s.cfg.ClosedSessionRetention())
 			s.invalidCookieTracker.Cleanup(now, s.cfg.InvalidCookieWindow())
+			s.purgeDNSQueryFragments(now)
 			if len(expired) == 0 {
 				continue
 			}
@@ -355,7 +369,7 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 	case Enums.PACKET_MTU_DOWN_REQ:
 		return s.handleMTUDownRequest(packet, parsed, decision, vpnPacket)
 	case Enums.PACKET_DNS_QUERY_REQ:
-		return s.handleDNSQueryRequest(packet, decision, vpnPacket)
+		return s.handleDNSQueryRequest(packet, parsed, decision, vpnPacket)
 	default:
 		return buildNoDataResponseLite(packet, parsed)
 	}
@@ -552,7 +566,7 @@ func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePac
 	return response
 }
 
-func (s *Server) handleDNSQueryRequest(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleDNSQueryRequest(questionPacket []byte, parsed DnsParser.LitePacket, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	sessionRecord, ok := s.sessions.Active(vpnPacket.SessionID)
 	if !ok {
 		return nil
@@ -562,7 +576,19 @@ func (s *Server) handleDNSQueryRequest(questionPacket []byte, decision domainmat
 		return nil
 	}
 
-	rawResponse := s.buildDNSQueryResponsePayload(vpnPacket.Payload)
+	assembledQuery, ready := s.collectDNSQueryFragments(
+		vpnPacket.SessionID,
+		vpnPacket.SequenceNum,
+		vpnPacket.Payload,
+		vpnPacket.FragmentID,
+		vpnPacket.TotalFragments,
+		time.Now(),
+	)
+	if !ready {
+		return buildNoDataResponseLite(questionPacket, parsed)
+	}
+
+	rawResponse := s.buildDNSQueryResponsePayload(assembledQuery, vpnPacket.SessionID, vpnPacket.SequenceNum)
 	if len(rawResponse) == 0 {
 		return nil
 	}
@@ -578,43 +604,6 @@ func (s *Server) handleDNSQueryRequest(questionPacket []byte, decision domainmat
 		CompressionType: sessionRecord.DownloadCompression,
 		Payload:         rawResponse,
 	}, sessionRecord.ResponseMode == mtuProbeModeBase64)
-	if err != nil {
-		return nil
-	}
-	return response
-}
-
-func (s *Server) buildDNSQueryResponsePayload(rawQuery []byte) []byte {
-	if !DnsParser.LooksLikeDNSRequest(rawQuery) {
-		return nil
-	}
-
-	parsed, err := DnsParser.ParsePacketLite(rawQuery)
-	if err != nil {
-		response, responseErr := DnsParser.BuildFormatErrorResponse(rawQuery)
-		if responseErr != nil {
-			return nil
-		}
-		return response
-	}
-
-	if !parsed.HasQuestion {
-		response, responseErr := DnsParser.BuildFormatErrorResponseFromLite(rawQuery, parsed)
-		if responseErr != nil {
-			return nil
-		}
-		return response
-	}
-
-	if parsed.FirstQuestion.Class != Enums.DNSQ_CLASS_IN {
-		response, responseErr := DnsParser.BuildNotImplementedResponseFromLite(rawQuery, parsed)
-		if responseErr != nil {
-			return nil
-		}
-		return response
-	}
-
-	response, err := DnsParser.BuildServerFailureResponseFromLite(rawQuery, parsed)
 	if err != nil {
 		return nil
 	}

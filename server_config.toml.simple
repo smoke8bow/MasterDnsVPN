@@ -44,6 +44,13 @@ CLOSED_SESSION_RETENTION_SECONDS = 600.0
 # The effective runtime value is also limited by 80% of session download MTU.
 MAX_PACKETS_PER_BATCH = 20
 
+# Upstream resolvers used for tunneled DNS queries.
+DNS_UPSTREAM_SERVERS = ["1.1.1.1:53"]
+DNS_UPSTREAM_TIMEOUT = 4.0
+DNS_FRAGMENT_ASSEMBLY_TIMEOUT = 16.0
+DNS_CACHE_MAX_RECORDS = 2000
+DNS_CACHE_TTL_SECONDS = 3600.0
+
 # Allowed tunnel domains.
 DOMAIN = ["v.domain.com"]
 
