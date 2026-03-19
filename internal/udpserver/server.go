@@ -33,11 +33,13 @@ import (
 )
 
 const (
-	mtuProbeModeRaw    = 0
-	mtuProbeModeBase64 = 1
-	mtuProbeCodeLength = 4
-	mtuProbeMetaLength = mtuProbeCodeLength + 2
-	sessionAcceptSize  = 7
+	mtuProbeModeRaw     = 0
+	mtuProbeModeBase64  = 1
+	mtuProbeCodeLength  = 4
+	mtuProbeMetaLength  = mtuProbeCodeLength + 2
+	mtuProbeUpMinSize   = 1 + mtuProbeCodeLength
+	mtuProbeDownMinSize = mtuProbeUpMinSize + 2
+	sessionAcceptSize   = 7
 )
 
 var preSessionPacketTypes = buildPreSessionPacketTypes()
@@ -599,24 +601,20 @@ func (s *Server) onDrop(addr *net.UDPAddr) {
 }
 
 func (s *Server) handleMTUUpRequest(questionPacket []byte, _ DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
-	if len(vpnPacket.Payload) < 1+mtuProbeCodeLength {
+	if len(vpnPacket.Payload) < mtuProbeUpMinSize {
 		return nil
 	}
 
-	baseEncode := vpnPacket.Payload[0] == mtuProbeModeBase64
-	if vpnPacket.Payload[0] != mtuProbeModeRaw && vpnPacket.Payload[0] != mtuProbeModeBase64 {
+	baseEncode, ok := parseMTUProbeBaseEncoding(vpnPacket.Payload[0])
+	if !ok {
 		return nil
 	}
 
-	probeCode := vpnPacket.Payload[1 : 1+mtuProbeCodeLength]
-	responsePayload := make([]byte, mtuProbeMetaLength)
-	copy(responsePayload, probeCode)
-
-	binary.BigEndian.PutUint16(responsePayload[mtuProbeCodeLength:], uint16(len(vpnPacket.Payload)))
+	responsePayload := buildMTUProbeMetaPayload(vpnPacket.Payload[1:mtuProbeUpMinSize], len(vpnPacket.Payload))
 	response, err := DnsParser.BuildVPNResponsePacket(questionPacket, decision.RequestName, VpnProto.Packet{
 		SessionID:  vpnPacket.SessionID,
 		PacketType: Enums.PACKET_MTU_UP_RES,
-		Payload:    responsePayload,
+		Payload:    responsePayload[:],
 	}, baseEncode)
 
 	if err != nil {
@@ -627,22 +625,21 @@ func (s *Server) handleMTUUpRequest(questionPacket []byte, _ DnsParser.LitePacke
 }
 
 func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
-	if len(vpnPacket.Payload) < 1+mtuProbeCodeLength+2 {
+	if len(vpnPacket.Payload) < mtuProbeDownMinSize {
 		return nil
 	}
 
-	baseEncode := vpnPacket.Payload[0] == mtuProbeModeBase64
-	if vpnPacket.Payload[0] != mtuProbeModeRaw && vpnPacket.Payload[0] != mtuProbeModeBase64 {
+	baseEncode, ok := parseMTUProbeBaseEncoding(vpnPacket.Payload[0])
+	if !ok {
 		return nil
 	}
-	downloadSize := int(binary.BigEndian.Uint16(vpnPacket.Payload[1+mtuProbeCodeLength : 1+mtuProbeCodeLength+2]))
+	downloadSize := int(binary.BigEndian.Uint16(vpnPacket.Payload[mtuProbeUpMinSize:mtuProbeDownMinSize]))
 	if downloadSize < 30 || downloadSize > 4096 {
 		return nil
 	}
 
-	probeCode := vpnPacket.Payload[1 : 1+mtuProbeCodeLength]
 	payload := make([]byte, downloadSize)
-	copy(payload, probeCode)
+	copy(payload[:mtuProbeCodeLength], vpnPacket.Payload[1:mtuProbeUpMinSize])
 	binary.BigEndian.PutUint16(payload[mtuProbeCodeLength:], uint16(downloadSize))
 	if downloadSize > mtuProbeMetaLength {
 		if _, err := rand.Read(payload[mtuProbeMetaLength:]); err != nil {
@@ -663,6 +660,24 @@ func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePac
 		return nil
 	}
 	return response
+}
+
+func parseMTUProbeBaseEncoding(mode uint8) (bool, bool) {
+	switch mode {
+	case mtuProbeModeRaw:
+		return false, true
+	case mtuProbeModeBase64:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+func buildMTUProbeMetaPayload(probeCode []byte, payloadLen int) [mtuProbeMetaLength]byte {
+	var payload [mtuProbeMetaLength]byte
+	copy(payload[:mtuProbeCodeLength], probeCode)
+	binary.BigEndian.PutUint16(payload[mtuProbeCodeLength:], uint16(payloadLen))
+	return payload
 }
 
 func (s *Server) handlePingRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) []byte {

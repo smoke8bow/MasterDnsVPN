@@ -13,7 +13,7 @@ import (
 	"errors"
 	"strings"
 
-	"masterdnsvpn-go/internal/basecodec"
+	baseCodec "masterdnsvpn-go/internal/basecodec"
 	"masterdnsvpn-go/internal/compression"
 	Enums "masterdnsvpn-go/internal/enums"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
@@ -245,7 +245,7 @@ func buildTXTAnswerChunks(rawFrame []byte, baseEncode bool) ([][]byte, error) {
 		if !baseEncode {
 			return [][]byte{appendLengthPrefixedTXT(rawFrame)}, nil
 		}
-		return [][]byte{appendLengthPrefixedTXT(basecodec.EncodeRawBase64(rawFrame))}, nil
+		return [][]byte{appendLengthPrefixedTXT(baseCodec.EncodeRawBase64(rawFrame))}, nil
 	}
 
 	header, err := VpnProto.Parse(rawFrame)
@@ -253,7 +253,7 @@ func buildTXTAnswerChunks(rawFrame []byte, baseEncode bool) ([][]byte, error) {
 		if !baseEncode {
 			return [][]byte{appendLengthPrefixedTXT(rawFrame)}, nil
 		}
-		return [][]byte{appendLengthPrefixedTXT(basecodec.EncodeRawBase64(rawFrame))}, nil
+		return [][]byte{appendLengthPrefixedTXT(baseCodec.EncodeRawBase64(rawFrame))}, nil
 	}
 
 	headerLen := header.HeaderLength
@@ -283,7 +283,7 @@ func buildTXTAnswerChunks(rawFrame []byte, baseEncode bool) ([][]byte, error) {
 	if !baseEncode {
 		chunks = append(chunks, appendLengthPrefixedTXT(rawChunk0))
 	} else {
-		chunks = append(chunks, appendLengthPrefixedTXT(basecodec.EncodeRawBase64(rawChunk0)))
+		chunks = append(chunks, appendLengthPrefixedTXT(baseCodec.EncodeRawBase64(rawChunk0)))
 	}
 
 	cursor := maxChunk0Data
@@ -298,7 +298,7 @@ func buildTXTAnswerChunks(rawFrame []byte, baseEncode bool) ([][]byte, error) {
 		if !baseEncode {
 			chunks = append(chunks, appendLengthPrefixedTXT(rawChunk))
 		} else {
-			chunks = append(chunks, appendLengthPrefixedTXT(basecodec.EncodeRawBase64(rawChunk)))
+			chunks = append(chunks, appendLengthPrefixedTXT(baseCodec.EncodeRawBase64(rawChunk)))
 		}
 		cursor = end
 	}
@@ -375,7 +375,7 @@ func assembleVPNResponse(rawAnswers [][]byte, baseEncoded bool) (VpnProto.Packet
 	if len(rawAnswers) == 1 {
 		raw := rawAnswers[0]
 		if baseEncoded {
-			decoded, err := basecodec.DecodeRawBase64(raw)
+			decoded, err := baseCodec.DecodeRawBase64(raw)
 			if err != nil {
 				return VpnProto.Packet{}, err
 			}
@@ -392,7 +392,7 @@ func assembleVPNResponse(rawAnswers [][]byte, baseEncoded bool) (VpnProto.Packet
 
 	for _, raw := range rawAnswers {
 		if baseEncoded {
-			decoded, err := basecodec.DecodeRawBase64(raw)
+			decoded, err := baseCodec.DecodeRawBase64(raw)
 			if err != nil {
 				return VpnProto.Packet{}, err
 			}
