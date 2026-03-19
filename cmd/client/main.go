@@ -18,11 +18,50 @@ import (
 	"masterdnsvpn-go/internal/client"
 )
 
+func exitWithStderrf(format string, args ...any) {
+	_, _ = fmt.Fprintf(os.Stderr, format, args...)
+	os.Exit(1)
+}
+
+func enabledClientListenerCount(appCfg clientConfigView) int {
+	count := 0
+	if appCfg.localDNSEnabled {
+		count++
+	}
+	if appCfg.localSOCKS5Enabled {
+		count++
+	}
+	if appCfg.protocolType == "TCP" {
+		count++
+	}
+	return count
+}
+
+func startClientListener(wg *sync.WaitGroup, errCh chan<- error, stop context.CancelFunc, label string, runCtx context.Context, run func(context.Context) error) {
+	if wg == nil || run == nil {
+		return
+	}
+	wg.Go(func() {
+		if err := run(runCtx); err != nil {
+			select {
+			case errCh <- fmt.Errorf("%s failed: %w", label, err):
+			default:
+			}
+			stop()
+		}
+	})
+}
+
+type clientConfigView struct {
+	protocolType       string
+	localDNSEnabled    bool
+	localSOCKS5Enabled bool
+}
+
 func main() {
 	app, err := client.Bootstrap("client_config.toml")
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Client startup failed: %v\n", err)
-		os.Exit(1)
+		exitWithStderrf("Client startup failed: %v\n", err)
 	}
 
 	cfg := app.Config()
@@ -73,8 +112,7 @@ func main() {
 	)
 
 	if err := app.RunInitialMTUTests(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Initial MTU testing failed: %v\n", err)
-		os.Exit(1)
+		exitWithStderrf("Initial MTU testing failed: %v\n", err)
 	}
 
 	log.Infof(
@@ -84,8 +122,7 @@ func main() {
 	)
 
 	if err := app.InitializeSession(10); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Session initialization failed: %v\n", err)
-		os.Exit(1)
+		exitWithStderrf("Session initialization failed: %v\n", err)
 	}
 
 	log.Infof(
@@ -93,7 +130,7 @@ func main() {
 		app.SessionID(),
 		app.SessionCookie(),
 	)
-	log.Infof("🎯 <green>Client Bootstrap Ready</green>")
+	log.Infof("\U0001F3AF <green>Client Bootstrap Ready</green>")
 
 	if !cfg.LocalDNSEnabled && !cfg.LocalSOCKS5Enabled && cfg.ProtocolType != "TCP" {
 		return
@@ -102,54 +139,28 @@ func main() {
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 3)
+	enabledListeners := enabledClientListenerCount(clientConfigView{
+		protocolType:       cfg.ProtocolType,
+		localDNSEnabled:    cfg.LocalDNSEnabled,
+		localSOCKS5Enabled: cfg.LocalSOCKS5Enabled,
+	})
+	errCh := make(chan error, enabledListeners)
 	var listenersWG sync.WaitGroup
 
 	if cfg.LocalDNSEnabled {
-		listenersWG.Add(1)
-		go func() {
-			defer listenersWG.Done()
-			if err := app.RunLocalDNSListener(runCtx); err != nil {
-				select {
-				case errCh <- fmt.Errorf("local dns listener failed: %w", err):
-				default:
-				}
-				stop()
-			}
-		}()
+		startClientListener(&listenersWG, errCh, stop, "local dns listener", runCtx, app.RunLocalDNSListener)
 	}
 	if cfg.LocalSOCKS5Enabled {
-		listenersWG.Add(1)
-		go func() {
-			defer listenersWG.Done()
-			if err := app.RunLocalSOCKS5Listener(runCtx); err != nil {
-				select {
-				case errCh <- fmt.Errorf("local socks5 listener failed: %w", err):
-				default:
-				}
-				stop()
-			}
-		}()
+		startClientListener(&listenersWG, errCh, stop, "local socks5 listener", runCtx, app.RunLocalSOCKS5Listener)
 	}
 	if cfg.ProtocolType == "TCP" {
-		listenersWG.Add(1)
-		go func() {
-			defer listenersWG.Done()
-			if err := app.RunLocalTCPListener(runCtx); err != nil {
-				select {
-				case errCh <- fmt.Errorf("local tcp listener failed: %w", err):
-				default:
-				}
-				stop()
-			}
-		}()
+		startClientListener(&listenersWG, errCh, stop, "local tcp listener", runCtx, app.RunLocalTCPListener)
 	}
 
 	listenersWG.Wait()
 	select {
 	case err := <-errCh:
-		_, _ = fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		exitWithStderrf("%v\n", err)
 	default:
 	}
 }
