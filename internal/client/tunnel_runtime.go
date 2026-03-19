@@ -103,42 +103,7 @@ func (c *Client) sendMainStreamPacket(packetType uint8, sequenceNum uint16, payl
 }
 
 func (c *Client) sendMainStreamPacketWithConnection(connection Connection, packetType uint8, sequenceNum uint16, payload []byte, timeout time.Duration) (VpnProto.Packet, error) {
-	fragments, err := c.fragmentMainStreamPayload(connection.Domain, packetType, payload)
-	if err != nil {
-		return VpnProto.Packet{}, err
-	}
-	for fragmentID, fragmentPayload := range fragments {
-		query, err := c.buildMainStreamQuery(
-			connection.Domain,
-			packetType,
-			sequenceNum,
-			uint8(fragmentID),
-			uint8(len(fragments)),
-			fragmentPayload,
-		)
-		if err != nil {
-			return VpnProto.Packet{}, err
-		}
-
-		response, err := c.exchangeDNSOverConnection(connection, query, timeout)
-		if err != nil {
-			return VpnProto.Packet{}, err
-		}
-		if fragmentID < len(fragments)-1 {
-			continue
-		}
-
-		packet, err := DnsParser.ExtractVPNResponse(response, c.responseMode == mtuProbeBase64Reply)
-		if err != nil || !c.validateServerPacket(packet) {
-			return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
-		}
-		if packet.StreamID != 0 || packet.SequenceNum != sequenceNum {
-			return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
-		}
-		return packet, nil
-	}
-
-	return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
+	return c.sendFragmentedStreamPacketWithConnection(connection, packetType, 0, sequenceNum, payload, timeout, ErrTunnelDNSDispatchFailed)
 }
 
 func (c *Client) sendStream0Packet(packet arq.QueuedPacket) (VpnProto.Packet, error) {
@@ -164,29 +129,6 @@ func (c *Client) sendStream0Packet(packet arq.QueuedPacket) (VpnProto.Packet, er
 	default:
 		return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
 	}
-}
-
-func (c *Client) buildMainStreamQuery(domain string, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, payload []byte) ([]byte, error) {
-	encoded, err := VpnProto.BuildEncodedAuto(VpnProto.BuildOptions{
-		SessionID:       c.sessionID,
-		PacketType:      packetType,
-		SessionCookie:   c.sessionCookie,
-		StreamID:        0,
-		SequenceNum:     sequenceNum,
-		FragmentID:      fragmentID,
-		TotalFragments:  totalFragments,
-		CompressionType: c.uploadCompression,
-		Payload:         payload,
-	}, c.codec, c.cfg.CompressionMinSize)
-	if err != nil {
-		return nil, err
-	}
-
-	name, err := DnsParser.BuildTunnelQuestionName(domain, encoded)
-	if err != nil {
-		return nil, err
-	}
-	return DnsParser.BuildTXTQuestionPacket(name, Enums.DNS_RECORD_TYPE_TXT, EDnsSafeUDPSize)
 }
 
 func (c *Client) buildSessionControlQuery(domain string, packetType uint8, payload []byte) ([]byte, error) {
@@ -298,7 +240,7 @@ func (c *Client) canBuildMainStreamPayload(domain string, packetType uint8, payl
 	for i := range payload {
 		payload[i] = 0xAB
 	}
-	_, err := c.buildMainStreamQuery(domain, packetType, 1, 0, 1, payload)
+	_, err := c.buildStreamQuery(domain, packetType, 0, 1, 0, 1, payload)
 	return err == nil
 }
 

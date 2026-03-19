@@ -91,6 +91,10 @@ func (c *Client) exchangeStreamControlPacket(packetType uint8, streamID uint16, 
 }
 
 func (c *Client) sendStreamControlPacketWithConnection(connection Connection, packetType uint8, streamID uint16, sequenceNum uint16, payload []byte, timeout time.Duration) (VpnProto.Packet, error) {
+	return c.sendFragmentedStreamPacketWithConnection(connection, packetType, streamID, sequenceNum, payload, timeout, ErrStreamHandshakeFailed)
+}
+
+func (c *Client) sendFragmentedStreamPacketWithConnection(connection Connection, packetType uint8, streamID uint16, sequenceNum uint16, payload []byte, timeout time.Duration, fallbackErr error) (VpnProto.Packet, error) {
 	fragments, err := c.fragmentMainStreamPayload(connection.Domain, packetType, payload)
 	if err != nil {
 		return VpnProto.Packet{}, err
@@ -120,15 +124,15 @@ func (c *Client) sendStreamControlPacketWithConnection(connection Connection, pa
 
 		packet, err := DnsParser.ExtractVPNResponse(response, c.responseMode == mtuProbeBase64Reply)
 		if err != nil || !c.validateServerPacket(packet) {
-			return VpnProto.Packet{}, ErrStreamHandshakeFailed
+			return VpnProto.Packet{}, fallbackErr
 		}
 		if packet.StreamID != streamID || packet.SequenceNum != sequenceNum {
-			return VpnProto.Packet{}, ErrStreamHandshakeFailed
+			return VpnProto.Packet{}, fallbackErr
 		}
 		return packet, nil
 	}
 
-	return VpnProto.Packet{}, ErrStreamHandshakeFailed
+	return VpnProto.Packet{}, fallbackErr
 }
 
 func (c *Client) buildStreamQuery(domain string, packetType uint8, streamID uint16, sequenceNum uint16, fragmentID uint8, totalFragments uint8, payload []byte) ([]byte, error) {
