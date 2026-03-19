@@ -136,7 +136,7 @@ func (c *Client) sendFragmentedStreamPacketWithConnection(connection Connection,
 }
 
 func (c *Client) buildStreamQuery(domain string, packetType uint8, streamID uint16, sequenceNum uint16, fragmentID uint8, totalFragments uint8, payload []byte) ([]byte, error) {
-	encoded, err := VpnProto.BuildEncodedAuto(VpnProto.BuildOptions{
+	return c.buildTunnelTXTQuery(domain, VpnProto.BuildOptions{
 		SessionID:       c.sessionID,
 		PacketType:      packetType,
 		SessionCookie:   c.sessionCookie,
@@ -146,16 +146,7 @@ func (c *Client) buildStreamQuery(domain string, packetType uint8, streamID uint
 		TotalFragments:  totalFragments,
 		CompressionType: c.uploadCompression,
 		Payload:         payload,
-	}, c.codec, c.cfg.CompressionMinSize)
-	if err != nil {
-		return nil, err
-	}
-
-	name, err := DnsParser.BuildTunnelQuestionName(domain, encoded)
-	if err != nil {
-		return nil, err
-	}
-	return DnsParser.BuildTXTQuestionPacket(name, Enums.DNS_RECORD_TYPE_TXT, EDnsSafeUDPSize)
+	})
 }
 
 func isSOCKS5ErrorPacket(packetType uint8) bool {

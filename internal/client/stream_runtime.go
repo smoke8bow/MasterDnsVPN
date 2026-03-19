@@ -252,6 +252,19 @@ func (c *Client) runClientStreamTXLoop(stream *clientStream, timeout time.Durati
 	if c == nil || stream == nil {
 		return
 	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if c.log != nil {
+				c.log.Errorf(
+					"💥 <red>Client Stream TX Loop Panic Recovered</red> <magenta>|</magenta> <blue>Stream</blue>: <cyan>%d</cyan> <magenta>|</magenta> <yellow>%v</yellow>",
+					stream.ID,
+					recovered,
+				)
+			}
+			_ = c.queueStreamPacket(stream, Enums.PACKET_STREAM_RST, nil)
+			c.deleteStream(stream.ID)
+		}
+	}()
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -450,6 +463,18 @@ func notifyStreamWake(stream *clientStream) {
 }
 
 func (c *Client) runLocalStreamReadLoop(stream *clientStream, timeout time.Duration) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if c.log != nil {
+				c.log.Errorf(
+					"💥 <red>Client Stream Read Loop Panic Recovered</red> <magenta>|</magenta> <blue>Stream</blue>: <cyan>%d</cyan> <magenta>|</magenta> <yellow>%v</yellow>",
+					stream.ID,
+					recovered,
+				)
+			}
+			_ = c.queueStreamPacket(stream, Enums.PACKET_STREAM_RST, nil)
+		}
+	}()
 	defer func() {
 		stream.mu.Lock()
 		closed := stream.Closed

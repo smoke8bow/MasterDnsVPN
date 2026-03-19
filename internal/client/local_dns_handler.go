@@ -43,7 +43,7 @@ func (c *Client) handleDNSQueryPacket(query []byte) ([]byte, *dnsDispatchRequest
 		}
 		return response, nil
 	}
-	if !isSupportedDNSQuery(metadata.QType, metadata.QClass) {
+	if !DnsParser.IsSupportedTunnelDNSQuery(metadata.QType, metadata.QClass) {
 		response, err := DnsParser.BuildNotImplementedResponseFromLite(query, metadata.Parsed)
 		if err != nil {
 			return nil, nil
@@ -141,30 +141,6 @@ func (c *Client) resolveDNSQueryPacket(query []byte) []byte {
 		)
 	}
 	return response
-}
-
-func isSupportedDNSQuery(qType uint16, qClass uint16) bool {
-	if qClass != 1 {
-		return false
-	}
-
-	switch qType {
-	case
-		1,   // A
-		28,  // AAAA
-		5,   // CNAME
-		15,  // MX
-		2,   // NS
-		12,  // PTR
-		33,  // SRV
-		64,  // SVCB
-		257, // CAA
-		35,  // NAPTR
-		6:   // SOA
-		return true
-	default:
-		return false
-	}
 }
 
 func parseDNSQueryMetadata(query []byte) (dnsQueryMetadata, bool) {

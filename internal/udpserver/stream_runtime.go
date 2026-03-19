@@ -25,6 +25,25 @@ func (s *Server) startStreamUpstreamReadLoop(sessionID uint8, streamID uint16, c
 	bufferSize := computeStreamReadBufferSize(mtu)
 	go func() {
 		defer func() {
+			if recovered := recover(); recovered != nil {
+				if s.log != nil {
+					s.log.Errorf(
+						"💥 <red>Upstream Stream Read Panic Recovered</red> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Stream</blue>: <cyan>%d</cyan> <magenta>|</magenta> <yellow>%v</yellow>",
+						sessionID,
+						streamID,
+						recovered,
+					)
+				}
+				now := time.Now()
+				if rstSeq, ok := s.streams.NextOutboundSequence(sessionID, streamID, now); ok {
+					_ = s.streams.MarkReset(sessionID, streamID, rstSeq, now)
+					_ = s.streamOutbound.Enqueue(sessionID, VpnProto.Packet{
+						PacketType:  Enums.PACKET_STREAM_RST,
+						StreamID:    streamID,
+						SequenceNum: rstSeq,
+					})
+				}
+			}
 			_ = conn.Close()
 		}()
 

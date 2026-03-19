@@ -54,7 +54,7 @@ func (s *Server) buildDNSQueryResponsePayload(rawQuery []byte, sessionID uint8, 
 		return response
 	}
 
-	if !isSupportedTunnelDNSQuery(parsed.FirstQuestion.Type, parsed.FirstQuestion.Class) {
+	if !DnsParser.IsSupportedTunnelDNSQuery(parsed.FirstQuestion.Type, parsed.FirstQuestion.Class) {
 		response, responseErr := DnsParser.BuildNotImplementedResponseFromLite(rawQuery, parsed)
 		if responseErr != nil {
 			return nil
@@ -300,28 +300,4 @@ func splitHostPortDefault53(value string) (string, string, error) {
 	}
 
 	return text, "53", nil
-}
-
-func isSupportedTunnelDNSQuery(qType uint16, qClass uint16) bool {
-	if qClass != Enums.DNSQ_CLASS_IN {
-		return false
-	}
-
-	switch qType {
-	case
-		Enums.DNS_RECORD_TYPE_A,
-		Enums.DNS_RECORD_TYPE_AAAA,
-		Enums.DNS_RECORD_TYPE_CNAME,
-		Enums.DNS_RECORD_TYPE_MX,
-		Enums.DNS_RECORD_TYPE_NS,
-		Enums.DNS_RECORD_TYPE_PTR,
-		Enums.DNS_RECORD_TYPE_SRV,
-		Enums.DNS_RECORD_TYPE_SVCB,
-		Enums.DNS_RECORD_TYPE_CAA,
-		Enums.DNS_RECORD_TYPE_NAPTR,
-		Enums.DNS_RECORD_TYPE_SOA:
-		return true
-	default:
-		return false
-	}
 }

@@ -164,21 +164,12 @@ func (c *Client) sendStreamPacket(packet arq.QueuedPacket, connections []Connect
 }
 
 func (c *Client) buildSessionControlQuery(domain string, packetType uint8, payload []byte) ([]byte, error) {
-	encoded, err := VpnProto.BuildEncodedAuto(VpnProto.BuildOptions{
+	return c.buildTunnelTXTQuery(domain, VpnProto.BuildOptions{
 		SessionID:     c.sessionID,
 		PacketType:    packetType,
 		SessionCookie: c.sessionCookie,
 		Payload:       payload,
-	}, c.codec, c.cfg.CompressionMinSize)
-	if err != nil {
-		return nil, err
-	}
-
-	name, err := DnsParser.BuildTunnelQuestionName(domain, encoded)
-	if err != nil {
-		return nil, err
-	}
-	return DnsParser.BuildTXTQuestionPacket(name, Enums.DNS_RECORD_TYPE_TXT, EDnsSafeUDPSize)
+	})
 }
 
 func (c *Client) fragmentMainStreamPayload(domain string, packetType uint8, payload []byte) ([][]byte, error) {
@@ -281,6 +272,19 @@ func shouldCacheTunnelDNSResponse(response []byte) bool {
 		return false
 	}
 	return binary.BigEndian.Uint16(response[2:4])&0x000F != Enums.DNSR_CODE_SERVER_FAILURE
+}
+
+func (c *Client) buildTunnelTXTQuery(domain string, options VpnProto.BuildOptions) ([]byte, error) {
+	encoded, err := VpnProto.BuildEncodedAuto(options, c.codec, c.cfg.CompressionMinSize)
+	if err != nil {
+		return nil, err
+	}
+
+	name, err := DnsParser.BuildTunnelQuestionName(domain, encoded)
+	if err != nil {
+		return nil, err
+	}
+	return DnsParser.BuildTXTQuestionPacket(name, Enums.DNS_RECORD_TYPE_TXT, EDnsSafeUDPSize)
 }
 
 type udpQueryTransport struct {
