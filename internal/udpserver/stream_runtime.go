@@ -37,7 +37,7 @@ func (s *Server) startStreamUpstreamReadLoop(sessionID uint8, streamID uint16, c
 				now := time.Now()
 				if rstSeq, ok := s.streams.NextOutboundSequence(sessionID, streamID, now); ok {
 					_ = s.streams.MarkReset(sessionID, streamID, rstSeq, now)
-					_ = s.streamOutbound.Enqueue(sessionID, VpnProto.Packet{
+					_ = s.queueSessionPacket(sessionID, VpnProto.Packet{
 						PacketType:  Enums.PACKET_STREAM_RST,
 						StreamID:    streamID,
 						SequenceNum: rstSeq,
@@ -56,7 +56,7 @@ func (s *Server) startStreamUpstreamReadLoop(sessionID uint8, streamID uint16, c
 				if !ok {
 					return
 				}
-				if !s.streamOutbound.Enqueue(sessionID, VpnProto.Packet{
+				if !s.queueSessionPacket(sessionID, VpnProto.Packet{
 					PacketType:      Enums.PACKET_STREAM_DATA,
 					StreamID:        streamID,
 					SequenceNum:     sequenceNum,
@@ -73,7 +73,7 @@ func (s *Server) startStreamUpstreamReadLoop(sessionID uint8, streamID uint16, c
 					rstNow := time.Now()
 					if rstSeq, ok := s.streams.NextOutboundSequence(sessionID, streamID, rstNow); ok {
 						_ = s.streams.MarkReset(sessionID, streamID, rstSeq, rstNow)
-						_ = s.streamOutbound.Enqueue(sessionID, VpnProto.Packet{
+						_ = s.queueSessionPacket(sessionID, VpnProto.Packet{
 							PacketType:  Enums.PACKET_STREAM_RST,
 							StreamID:    streamID,
 							SequenceNum: rstSeq,
@@ -90,7 +90,7 @@ func (s *Server) startStreamUpstreamReadLoop(sessionID uint8, streamID uint16, c
 				now := time.Now()
 				if sequenceNum, ok := s.streams.NextOutboundSequence(sessionID, streamID, now); ok {
 					_, _ = s.streams.MarkLocalFin(sessionID, streamID, sequenceNum, now)
-					_ = s.streamOutbound.Enqueue(sessionID, VpnProto.Packet{
+					_ = s.queueSessionPacket(sessionID, VpnProto.Packet{
 						PacketType:  Enums.PACKET_STREAM_FIN,
 						StreamID:    streamID,
 						SequenceNum: sequenceNum,
@@ -109,7 +109,7 @@ func (s *Server) startStreamUpstreamReadLoop(sessionID uint8, streamID uint16, c
 			}
 			now := time.Now()
 			if sequenceNum, ok := s.streams.NextOutboundSequence(sessionID, streamID, now); ok {
-				_ = s.streamOutbound.Enqueue(sessionID, VpnProto.Packet{
+				_ = s.queueSessionPacket(sessionID, VpnProto.Packet{
 					PacketType:  Enums.PACKET_STREAM_RST,
 					StreamID:    streamID,
 					SequenceNum: sequenceNum,

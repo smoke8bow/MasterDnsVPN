@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"masterdnsvpn-go/internal/arq"
 	"masterdnsvpn-go/internal/config"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
@@ -516,7 +517,8 @@ func TestHandlePacketPingReturnsQueuedStreamPacket(t *testing.T) {
 
 	sessionID := packet.Payload[0]
 	sessionCookie := packet.Payload[1]
-	srv.streamOutbound.Enqueue(sessionID, VpnProto.Packet{
+	srv.streamOutbound.ConfigureSession(sessionID, 8)
+	srv.streamOutbound.Enqueue(sessionID, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_DATA,
 		StreamID:    11,
 		SequenceNum: 9,
@@ -545,13 +547,13 @@ func TestStreamOutboundStoreSupportsWindowAndOutOfOrderAck(t *testing.T) {
 	store := newStreamOutboundStore(4, 256)
 	now := time.Now()
 
-	store.Enqueue(7, VpnProto.Packet{
+	store.Enqueue(7, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_DATA,
 		StreamID:    11,
 		SequenceNum: 1,
 		Payload:     []byte("one"),
 	})
-	store.Enqueue(7, VpnProto.Packet{
+	store.Enqueue(7, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_DATA,
 		StreamID:    11,
 		SequenceNum: 2,
@@ -585,13 +587,13 @@ func TestStreamOutboundStoreResetClearsStreamBacklog(t *testing.T) {
 	store := newStreamOutboundStore(4, 256)
 	now := time.Now()
 
-	store.Enqueue(9, VpnProto.Packet{
+	store.Enqueue(9, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_DATA,
 		StreamID:    33,
 		SequenceNum: 1,
 		Payload:     []byte("one"),
 	})
-	store.Enqueue(9, VpnProto.Packet{
+	store.Enqueue(9, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_DATA,
 		StreamID:    44,
 		SequenceNum: 1,
@@ -602,7 +604,7 @@ func TestStreamOutboundStoreResetClearsStreamBacklog(t *testing.T) {
 		t.Fatalf("unexpected first packet: ok=%v packet=%+v", ok, first)
 	}
 
-	store.Enqueue(9, VpnProto.Packet{
+	store.Enqueue(9, arq.QueueTargetMain, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_RST,
 		StreamID:    33,
 		SequenceNum: 2,
@@ -622,7 +624,7 @@ func TestStreamOutboundStoreDropsOnlyDataWhenQueueLimitReached(t *testing.T) {
 	store := newStreamOutboundStore(1, 2)
 	now := time.Now()
 
-	if !store.Enqueue(3, VpnProto.Packet{
+	if !store.Enqueue(3, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_DATA,
 		StreamID:    7,
 		SequenceNum: 1,
@@ -634,7 +636,7 @@ func TestStreamOutboundStoreDropsOnlyDataWhenQueueLimitReached(t *testing.T) {
 	if !ok || first.SequenceNum != 1 {
 		t.Fatalf("unexpected first packet: ok=%v packet=%+v", ok, first)
 	}
-	if !store.Enqueue(3, VpnProto.Packet{
+	if !store.Enqueue(3, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_DATA,
 		StreamID:    7,
 		SequenceNum: 2,
@@ -642,7 +644,7 @@ func TestStreamOutboundStoreDropsOnlyDataWhenQueueLimitReached(t *testing.T) {
 	}) {
 		t.Fatal("expected second data enqueue to succeed")
 	}
-	if store.Enqueue(3, VpnProto.Packet{
+	if store.Enqueue(3, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_DATA,
 		StreamID:    7,
 		SequenceNum: 3,
@@ -650,7 +652,7 @@ func TestStreamOutboundStoreDropsOnlyDataWhenQueueLimitReached(t *testing.T) {
 	}) {
 		t.Fatal("expected third data enqueue to be rejected by queue limit")
 	}
-	if !store.Enqueue(3, VpnProto.Packet{
+	if !store.Enqueue(3, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_FIN,
 		StreamID:    7,
 		SequenceNum: 4,
@@ -663,7 +665,7 @@ func TestStreamOutboundStoreExpiresStalledPendingPackets(t *testing.T) {
 	store := newStreamOutboundStore(1, 8)
 	now := time.Now()
 
-	if !store.Enqueue(9, VpnProto.Packet{
+	if !store.Enqueue(9, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_DATA,
 		StreamID:    21,
 		SequenceNum: 1,
@@ -697,13 +699,13 @@ func TestStreamOutboundStoreRoundRobinsEqualPriorityStreamData(t *testing.T) {
 	store := newStreamOutboundStore(1, 8)
 	now := time.Now()
 
-	if !store.Enqueue(5, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_DATA, StreamID: 1, SequenceNum: 1}) {
+	if !store.Enqueue(5, arq.QueueTargetStream, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_DATA, StreamID: 1, SequenceNum: 1}) {
 		t.Fatal("expected enqueue to succeed")
 	}
-	if !store.Enqueue(5, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_DATA, StreamID: 2, SequenceNum: 2}) {
+	if !store.Enqueue(5, arq.QueueTargetStream, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_DATA, StreamID: 2, SequenceNum: 2}) {
 		t.Fatal("expected enqueue to succeed")
 	}
-	if !store.Enqueue(5, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_DATA, StreamID: 1, SequenceNum: 3}) {
+	if !store.Enqueue(5, arq.QueueTargetStream, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_DATA, StreamID: 1, SequenceNum: 3}) {
 		t.Fatal("expected enqueue to succeed")
 	}
 
@@ -725,10 +727,10 @@ func TestStreamOutboundStorePrioritizesControlOverQueuedData(t *testing.T) {
 	store := newStreamOutboundStore(1, 8)
 	now := time.Now()
 
-	if !store.Enqueue(6, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_DATA, StreamID: 10, SequenceNum: 1}) {
+	if !store.Enqueue(6, arq.QueueTargetStream, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_DATA, StreamID: 10, SequenceNum: 1}) {
 		t.Fatal("expected data enqueue to succeed")
 	}
-	if !store.Enqueue(6, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_FIN, StreamID: 11, SequenceNum: 2}) {
+	if !store.Enqueue(6, arq.QueueTargetStream, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_FIN, StreamID: 11, SequenceNum: 2}) {
 		t.Fatal("expected fin enqueue to succeed")
 	}
 
@@ -738,11 +740,35 @@ func TestStreamOutboundStorePrioritizesControlOverQueuedData(t *testing.T) {
 	}
 }
 
+func TestStreamOutboundStorePacksSamePriorityControlBlocksAcrossStreams(t *testing.T) {
+	store := newStreamOutboundStore(2, 8)
+	store.ConfigureSession(8, 4)
+	now := time.Now()
+
+	if !store.Enqueue(8, arq.QueueTargetStream, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_FIN_ACK, StreamID: 10, SequenceNum: 1}) {
+		t.Fatal("expected first control enqueue to succeed")
+	}
+	if !store.Enqueue(8, arq.QueueTargetStream, VpnProto.Packet{PacketType: Enums.PACKET_STREAM_RST_ACK, StreamID: 11, SequenceNum: 2}) {
+		t.Fatal("expected second control enqueue to succeed")
+	}
+
+	packet, ok := store.Next(8, now)
+	if !ok {
+		t.Fatal("expected packed control response")
+	}
+	if packet.PacketType != Enums.PACKET_PACKED_CONTROL_BLOCKS {
+		t.Fatalf("expected packed control blocks packet, got=%d", packet.PacketType)
+	}
+	if len(packet.Payload) != 2*arq.PackedControlBlockSize {
+		t.Fatalf("unexpected packed payload length: got=%d", len(packet.Payload))
+	}
+}
+
 func TestStreamOutboundStoreAdaptsRetryBaseAfterAck(t *testing.T) {
 	store := newStreamOutboundStore(1, 8)
 	now := time.Now()
 
-	if !store.Enqueue(7, VpnProto.Packet{
+	if !store.Enqueue(7, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_DATA,
 		StreamID:    3,
 		SequenceNum: 1,
@@ -765,7 +791,7 @@ func TestStreamOutboundStoreAdaptsRetryBaseAfterAck(t *testing.T) {
 	session.pending[0].LastSentAt = now.Add(-150 * time.Millisecond)
 	store.mu.Unlock()
 
-	if !store.Enqueue(7, VpnProto.Packet{
+	if !store.Enqueue(7, arq.QueueTargetStream, VpnProto.Packet{
 		PacketType:  Enums.PACKET_STREAM_DATA,
 		StreamID:    3,
 		SequenceNum: 2,

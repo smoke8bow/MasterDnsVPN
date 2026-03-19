@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"masterdnsvpn-go/internal/arq"
 	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
 	"masterdnsvpn-go/internal/dnscache"
@@ -1578,6 +1579,41 @@ func TestClientStreamRTTAdjustsRetryBaseAfterAck(t *testing.T) {
 	}
 	if stream.TXQueue[0].RetryDelay < streamTXMinRetryDelay || stream.TXQueue[0].RetryDelay > streamTXMaxRetryDelay {
 		t.Fatalf("expected retry delay to stay clamped, got=%v", stream.TXQueue[0].RetryDelay)
+	}
+}
+
+func TestHandlePackedServerControlBlocksAcksQueuedStreamPackets(t *testing.T) {
+	c := New(config.ClientConfig{}, nil, nil)
+	localConn, remoteConn := net.Pipe()
+	defer localConn.Close()
+	defer remoteConn.Close()
+
+	stream := c.createStream(9, localConn)
+	stream.mu.Lock()
+	stream.TXInFlight = append(stream.TXInFlight, clientStreamTXPacket{
+		PacketType:  Enums.PACKET_STREAM_DATA,
+		SequenceNum: 7,
+		LastSentAt:  time.Now(),
+		RetryDelay:  streamTXInitialRetryDelay,
+		CreatedAt:   time.Now(),
+		Scheduled:   true,
+	})
+	stream.mu.Unlock()
+
+	payload := make([]byte, 0, 2*arq.PackedControlBlockSize)
+	payload = append(payload,
+		Enums.PACKET_STREAM_DATA_ACK, 0x00, 0x09, 0x00, 0x07,
+		Enums.PACKET_STREAM_FIN_ACK, 0x00, 0x0A, 0x00, 0x01,
+	)
+
+	if err := c.handlePackedServerControlBlocks(payload, time.Second); err != nil {
+		t.Fatalf("handlePackedServerControlBlocks returned error: %v", err)
+	}
+
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if len(stream.TXInFlight) != 0 {
+		t.Fatalf("expected packed ACK to clear inflight packet, got=%d", len(stream.TXInFlight))
 	}
 }
 

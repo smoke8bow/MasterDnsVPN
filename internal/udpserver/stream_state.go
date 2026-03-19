@@ -249,6 +249,15 @@ func (s *streamStateStore) Lookup(sessionID uint8, streamID uint16) (*streamStat
 	return cloneStreamStateRecord(record), true
 }
 
+func (s *streamStateStore) Exists(sessionID uint8, streamID uint16) bool {
+	if s == nil || streamID == 0 {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lookupLocked(sessionID, streamID) != nil
+}
+
 func (s *streamStateStore) RemoveSession(sessionID uint8) {
 	s.mu.Lock()
 	streams := s.sessions[sessionID]

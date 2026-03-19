@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"masterdnsvpn-go/internal/arq"
 	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
 	dnsCache "masterdnsvpn-go/internal/dnscache"
@@ -399,6 +400,8 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 
 func (s *Server) handlePostSessionPacket(parsed DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
 	switch vpnPacket.PacketType {
+	case Enums.PACKET_PACKED_CONTROL_BLOCKS:
+		return s.handlePackedControlBlocksRequest(vpnPacket, sessionRecord)
 	case Enums.PACKET_PING:
 		return s.handlePingRequest(vpnPacket, sessionRecord)
 	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
@@ -425,6 +428,9 @@ func (s *Server) validatePostSessionPacket(questionPacket []byte, requestName st
 	now := time.Now()
 	validation := s.sessions.ValidateAndTouch(vpnPacket.SessionID, vpnPacket.SessionCookie, now)
 	if validation.Valid {
+		if validation.Active != nil {
+			s.streamOutbound.ConfigureSession(validation.Active.ID, validation.Active.MaxPackedBlocks)
+		}
 		return postSessionValidation{
 			record: validation.Active,
 			ok:     true,
@@ -540,10 +546,15 @@ func (s *Server) buildSessionVPNResponse(questionPacket []byte, requestName stri
 }
 
 func (s *Server) queueSessionPacket(sessionID uint8, packet VpnProto.Packet) bool {
-	if s == nil {
+	if s == nil || sessionID == 0 {
 		return false
 	}
-	return s.streamOutbound.Enqueue(sessionID, packet)
+	streamExists := packet.StreamID != 0 && s.streams.Exists(sessionID, packet.StreamID)
+	target, ok := arq.QueueTargetForPacket(streamExists, packet.PacketType, packet.StreamID)
+	if !ok {
+		return false
+	}
+	return s.streamOutbound.Enqueue(sessionID, target, packet)
 }
 
 func (s *Server) serveQueuedOrPong(questionPacket []byte, requestName string, sessionRecord *sessionRuntimeView, sessionID uint8, now time.Time) []byte {
@@ -646,6 +657,7 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 	if record == nil {
 		return nil
 	}
+	s.streamOutbound.ConfigureSession(record.ID, record.MaxPackedBlocks)
 
 	if !reused && s.log != nil {
 		s.log.Infof(
@@ -832,6 +844,48 @@ func fillMTUProbeBytes(dst []byte, pattern []byte) {
 
 func (s *Server) handlePingRequest(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
 	return sessionRecord != nil
+}
+
+func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
+	if sessionRecord == nil || len(vpnPacket.Payload) < arq.PackedControlBlockSize {
+		return false
+	}
+
+	handled := false
+	arq.ForEachPackedControlBlock(vpnPacket.Payload, func(packetType uint8, streamID uint16, sequenceNum uint16) bool {
+		if packetType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
+			return true
+		}
+		block := VpnProto.Packet{
+			SessionID:      vpnPacket.SessionID,
+			SessionCookie:  vpnPacket.SessionCookie,
+			PacketType:     packetType,
+			StreamID:       streamID,
+			HasStreamID:    streamID != 0,
+			SequenceNum:    sequenceNum,
+			HasSequenceNum: sequenceNum != 0,
+		}
+		if s.handlePackedPostSessionBlock(block, sessionRecord) {
+			handled = true
+		}
+		return true
+	})
+	return handled
+}
+
+func (s *Server) handlePackedPostSessionBlock(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
+	switch vpnPacket.PacketType {
+	case Enums.PACKET_PING:
+		return s.handlePingRequest(vpnPacket, sessionRecord)
+	case Enums.PACKET_STREAM_DATA_ACK, Enums.PACKET_STREAM_FIN_ACK, Enums.PACKET_STREAM_RST_ACK, Enums.PACKET_STREAM_SYN_ACK:
+		return s.handleStreamAckPacket(vpnPacket, sessionRecord)
+	case Enums.PACKET_STREAM_FIN:
+		return s.handleStreamFinRequest(vpnPacket, sessionRecord)
+	case Enums.PACKET_STREAM_RST:
+		return s.handleStreamRSTRequest(vpnPacket, sessionRecord)
+	default:
+		return false
+	}
 }
 
 func (s *Server) processDeferredDNSQuery(decision domainMatcher.Decision, vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) {
@@ -1283,7 +1337,7 @@ func (s *Server) expireStalledOutboundStreams(sessionID uint8, now time.Time) {
 		}
 		_ = streams.MarkReset(sessionID, streamID, sequenceNum, now)
 		deferred.RemoveLane(deferredSessionLane{sessionID: sessionID, streamID: streamID})
-		_ = streamOutbound.Enqueue(sessionID, VpnProto.Packet{
+		_ = s.queueSessionPacket(sessionID, VpnProto.Packet{
 			PacketType:  Enums.PACKET_STREAM_RST,
 			StreamID:    streamID,
 			SequenceNum: sequenceNum,

@@ -13,6 +13,7 @@ import (
 	"net"
 	"time"
 
+	"masterdnsvpn-go/internal/arq"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/streamutil"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
@@ -130,6 +131,8 @@ func (c *Client) handleFollowUpServerPacket(packet VpnProto.Packet, timeout time
 		switch current.PacketType {
 		case 0, Enums.PACKET_PONG, Enums.PACKET_STREAM_DATA_ACK, Enums.PACKET_STREAM_FIN_ACK, Enums.PACKET_STREAM_RST_ACK, Enums.PACKET_STREAM_SYN_ACK, Enums.PACKET_SOCKS5_SYN_ACK:
 			return nil
+		case Enums.PACKET_PACKED_CONTROL_BLOCKS:
+			return c.handlePackedServerControlBlocks(current.Payload, timeout)
 		case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_FIN, Enums.PACKET_STREAM_RST:
 			nextPacket, err := c.handleInboundStreamPacket(current, timeout)
 			if err != nil {
@@ -144,6 +147,39 @@ func (c *Client) handleFollowUpServerPacket(packet VpnProto.Packet, timeout time
 		}
 	}
 	return nil
+}
+
+func (c *Client) handlePackedServerControlBlocks(payload []byte, timeout time.Duration) error {
+	if len(payload) < arq.PackedControlBlockSize {
+		return nil
+	}
+	var firstErr error
+	arq.ForEachPackedControlBlock(payload, func(packetType uint8, streamID uint16, sequenceNum uint16) bool {
+		if packetType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
+			return true
+		}
+		switch packetType {
+		case Enums.PACKET_STREAM_DATA_ACK, Enums.PACKET_STREAM_FIN_ACK, Enums.PACKET_STREAM_RST_ACK:
+			if stream, ok := c.getStream(streamID); ok {
+				ackClientStreamTX(stream, sequenceNum, time.Now())
+				notifyStreamWake(stream)
+			}
+			return true
+		}
+		packet := VpnProto.Packet{
+			PacketType:     packetType,
+			StreamID:       streamID,
+			HasStreamID:    streamID != 0,
+			SequenceNum:    sequenceNum,
+			HasSequenceNum: sequenceNum != 0,
+		}
+		if err := c.handleFollowUpServerPacket(packet, timeout); err != nil && firstErr == nil {
+			firstErr = err
+			return false
+		}
+		return true
+	})
+	return firstErr
 }
 
 func (c *Client) handleInboundStreamPacket(packet VpnProto.Packet, timeout time.Duration) (VpnProto.Packet, error) {

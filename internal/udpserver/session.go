@@ -54,6 +54,7 @@ type sessionRuntimeView struct {
 	ResponseBase64      bool
 	DownloadCompression uint8
 	DownloadMTU         uint16
+	MaxPackedBlocks     int
 }
 
 type sessionSnapshot struct {
@@ -447,6 +448,7 @@ func (r *sessionRecord) runtimeView() sessionRuntimeView {
 		ResponseBase64:      r.ResponseMode == mtuProbeModeBase64,
 		DownloadCompression: r.DownloadCompression,
 		DownloadMTU:         r.DownloadMTU,
+		MaxPackedBlocks:     r.MaxPackedBlocks,
 	}
 }
 

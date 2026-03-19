@@ -20,13 +20,6 @@ import (
 
 var ErrStream0RuntimeStopped = errors.New("stream 0 runtime stopped")
 
-const (
-	stream0DNSPriority           = 2
-	stream0StreamControlPriority = 3
-	stream0PingPriority          = 4
-	stream0StreamDataPriority    = 8
-)
-
 var (
 	stream0DNSRetryBaseDelay         = 350 * time.Millisecond
 	stream0DNSRetryMaxDelay          = 2 * time.Second
@@ -167,7 +160,7 @@ func (r *stream0Runtime) ExchangeDNSQuery(payload []byte, timeout time.Duration)
 		StreamID:    0,
 		SequenceNum: sequenceNum,
 		Payload:     payload,
-		Priority:    stream0DNSPriority,
+		Priority:    arq.DefaultPriorityForPacket(Enums.PACKET_DNS_QUERY_REQ),
 	})
 	if !enqueued {
 		r.removePending(sequenceNum)
@@ -208,7 +201,7 @@ func (r *stream0Runtime) QueuePing() bool {
 	if !r.scheduler.Enqueue(arq.QueueTargetMain, arq.QueuedPacket{
 		PacketType: Enums.PACKET_PING,
 		Payload:    payload,
-		Priority:   stream0PingPriority,
+		Priority:   arq.DefaultPriorityForPacket(Enums.PACKET_PING),
 	}) {
 		return false
 	}
@@ -225,7 +218,7 @@ func (r *stream0Runtime) QueueStreamPacket(streamID uint16, packetType uint8, se
 		StreamID:    streamID,
 		SequenceNum: sequenceNum,
 		Payload:     payload,
-		Priority:    stream0PriorityForPacket(packetType),
+		Priority:    arq.DefaultPriorityForPacket(packetType),
 	}) {
 		return false
 	}
@@ -332,6 +325,14 @@ func (r *stream0Runtime) processDequeue(packet arq.QueuedPacket) {
 	}
 
 	switch response.PacketType {
+	case Enums.PACKET_PACKED_CONTROL_BLOCKS:
+		r.noteServerDataActivity()
+		if err := r.client.handlePackedServerControlBlocks(response.Payload, time.Second); err != nil && r.client.log != nil {
+			r.client.log.Debugf(
+				"ðŸ§µ <yellow>Packed Control Handling Failed</yellow> <magenta>|</magenta> <cyan>%v</cyan>",
+				err,
+			)
+		}
 	case Enums.PACKET_DNS_QUERY_RES:
 		r.completePending(response.SequenceNum, response, nil)
 		r.noteServerDataActivity()
@@ -474,22 +475,13 @@ func (r *stream0Runtime) scheduleRetry(sequenceNum uint16, err error) {
 			StreamID:    0,
 			SequenceNum: sequenceNum,
 			Payload:     payload,
-			Priority:    stream0DNSPriority,
+			Priority:    arq.DefaultPriorityForPacket(packetType),
 		}) {
 			r.scheduleRetry(sequenceNum, err)
 			return
 		}
 		r.notifyWake()
 	}()
-}
-
-func stream0PriorityForPacket(packetType uint8) int {
-	switch packetType {
-	case Enums.PACKET_STREAM_DATA:
-		return stream0StreamDataPriority
-	default:
-		return stream0StreamControlPriority
-	}
 }
 
 func (r *stream0Runtime) rescheduleStreamPacket(streamID uint16, sequenceNum uint16) {

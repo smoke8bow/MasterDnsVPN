@@ -30,11 +30,14 @@ const (
 )
 
 type QueuedPacket struct {
-	PacketType  uint8
-	StreamID    uint16
-	SequenceNum uint16
-	Payload     []byte
-	Priority    int
+	PacketType      uint8
+	StreamID        uint16
+	SequenceNum     uint16
+	FragmentID      uint8
+	TotalFragments  uint8
+	CompressionType uint8
+	Payload         []byte
+	Priority        int
 }
 
 type DequeueResult struct {
@@ -589,6 +592,19 @@ func normalizePriority(priority int) int {
 	return priority
 }
 
+func DefaultPriorityForPacket(packetType uint8) int {
+	switch packetType {
+	case Enums.PACKET_DNS_QUERY_REQ, Enums.PACKET_DNS_QUERY_RES:
+		return 2
+	case Enums.PACKET_PING, Enums.PACKET_PONG:
+		return 4
+	case Enums.PACKET_STREAM_DATA:
+		return 8
+	default:
+		return 3
+	}
+}
+
 func effectivePriorityForPacket(packetType uint8, priority int) int {
 	switch packetType {
 	case Enums.PACKET_STREAM_DATA_ACK,
@@ -604,6 +620,52 @@ func effectivePriorityForPacket(packetType uint8, priority int) int {
 		return 4
 	default:
 		return normalizePriority(priority)
+	}
+}
+
+func QueueTargetForPacket(streamExists bool, packetType uint8, streamID uint16) (QueueTarget, bool) {
+	if streamID == 0 {
+		return QueueTargetMain, true
+	}
+	if streamExists {
+		return QueueTargetStream, true
+	}
+	if IsClosedStreamFallbackPacket(packetType) {
+		return QueueTargetMain, true
+	}
+	return QueueTargetMain, false
+}
+
+func IsClosedStreamFallbackPacket(packetType uint8) bool {
+	switch packetType {
+	case Enums.PACKET_STREAM_RST,
+		Enums.PACKET_STREAM_RST_ACK,
+		Enums.PACKET_STREAM_FIN_ACK,
+		Enums.PACKET_STREAM_SYN_ACK,
+		Enums.PACKET_SOCKS5_SYN_ACK,
+		Enums.PACKET_SOCKS5_CONNECT_FAIL,
+		Enums.PACKET_SOCKS5_CONNECT_FAIL_ACK,
+		Enums.PACKET_SOCKS5_RULESET_DENIED,
+		Enums.PACKET_SOCKS5_RULESET_DENIED_ACK,
+		Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE,
+		Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE_ACK,
+		Enums.PACKET_SOCKS5_HOST_UNREACHABLE,
+		Enums.PACKET_SOCKS5_HOST_UNREACHABLE_ACK,
+		Enums.PACKET_SOCKS5_CONNECTION_REFUSED,
+		Enums.PACKET_SOCKS5_CONNECTION_REFUSED_ACK,
+		Enums.PACKET_SOCKS5_TTL_EXPIRED,
+		Enums.PACKET_SOCKS5_TTL_EXPIRED_ACK,
+		Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED,
+		Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED_ACK,
+		Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED,
+		Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED_ACK,
+		Enums.PACKET_SOCKS5_AUTH_FAILED,
+		Enums.PACKET_SOCKS5_AUTH_FAILED_ACK,
+		Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE,
+		Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE_ACK:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -717,6 +779,20 @@ func appendPackedControlBlock(dst []byte, packet QueuedPacket) []byte {
 		byte(packet.SequenceNum>>8),
 		byte(packet.SequenceNum),
 	)
+}
+
+func ForEachPackedControlBlock(payload []byte, yield func(packetType uint8, streamID uint16, sequenceNum uint16) bool) {
+	if len(payload) < PackedControlBlockSize || yield == nil {
+		return
+	}
+	for offset := 0; offset+PackedControlBlockSize <= len(payload); offset += PackedControlBlockSize {
+		packetType := payload[offset]
+		streamID := uint16(payload[offset+1])<<8 | uint16(payload[offset+2])
+		sequenceNum := uint16(payload[offset+3])<<8 | uint16(payload[offset+4])
+		if !yield(packetType, streamID, sequenceNum) {
+			return
+		}
+	}
 }
 
 func (h packetPriorityHeap) Len() int { return len(h) }
