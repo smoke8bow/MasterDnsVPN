@@ -94,6 +94,24 @@ type Client struct {
 	// Local Proxy Daemons
 	tcpListener *TCPListener
 	dnsListener *DNSListener
+
+	// Stream Management
+	streamsMu      sync.RWMutex
+	active_streams map[uint16]*Stream_client
+	last_stream_id uint16
+}
+
+// clientStreamTXPacket represents a queued packet pending transmission or retransmission.
+type clientStreamTXPacket struct {
+	PacketType  uint8
+	SequenceNum uint16
+	Payload     []byte
+	CreatedAt   time.Time
+	LastSentAt  time.Time
+	RetryDelay  time.Duration
+	RetryAt     time.Time
+	RetryCount  int
+	Scheduled   bool
 }
 
 // Connection represents a unique domain-resolver pair with its associated metadata and MTU states.
