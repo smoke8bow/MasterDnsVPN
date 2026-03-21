@@ -33,21 +33,6 @@ SESSION_CLEANUP_INTERVAL_SECONDS = 30.0
 CLOSED_SESSION_RETENTION_SECONDS = 600.0
 
 # ------------------------------------------------------------------------------
-# 3) Stream Queues & Retry Limits
-# ------------------------------------------------------------------------------
-
-# Hard cap for how many small control packets may be packed into one block.
-# The effective runtime value is also limited by 80% of session download MTU.
-MAX_PACKETS_PER_BATCH = 20
-
-STREAM_OUTBOUND_WINDOW = 4
-STREAM_OUTBOUND_QUEUE_LIMIT = 256
-STREAM_OUTBOUND_MAX_RETRIES = 24
-STREAM_OUTBOUND_TTL_SECONDS = 120.0
-
-# ------------------------------------------------------------------------------
-# 4) DNS Upstream & Cache
-# ------------------------------------------------------------------------------
 
 DNS_UPSTREAM_SERVERS = ["1.1.1.1:53"]
 DNS_UPSTREAM_TIMEOUT = 4.0

@@ -1,4 +1,4 @@
-﻿// ==============================================================================
+// ==============================================================================
 // MasterDnsVPN
 // Author: MasterkinG32
 // Github: https://github.com/masterking32
@@ -310,6 +310,7 @@ func TestHandlePacketReturnsAlternatingErrorDropModesForUnknownSessions(t *testi
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	query := buildTunnelQueryWithCookie(t, codec, "a.com", 77, 55, Enums.PACKET_PING, nil)
@@ -391,6 +392,7 @@ func TestHandlePacketReturnsResetForLateClosedStreamData(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	verifyCode := []byte{1, 2, 3, 4}
@@ -439,6 +441,7 @@ func TestHandlePacketRejectsMalformedSessionInit(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11, 0x99}
@@ -458,6 +461,7 @@ func TestHandlePacketRejectsShortSessionInit(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	payload := []byte{1, 0x21, 0x00, 0x96}
@@ -507,6 +511,7 @@ func TestHandlePacketDropsPostSessionPacketWithInvalidCookie(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	verifyCode := []byte{0x44, 0x33, 0x22, 0x11}
@@ -550,6 +555,7 @@ func TestHandlePacketAcceptsPostSessionPacketWithValidCookie(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	verifyCode := []byte{0x10, 0x20, 0x30, 0x40}
@@ -600,6 +606,7 @@ func TestHandlePacketRespondsToPingWithPong(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	verifyCode := []byte{0x10, 0x20, 0x30, 0x40}
@@ -650,6 +657,7 @@ func TestHandlePacketPingReturnsQueuedStreamPacket(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, 0x10, 0x20, 0x30, 0x40}
@@ -979,6 +987,7 @@ func TestHandlePacketRespondsToStreamLifecyclePackets(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, 0x10, 0x20, 0x30, 0x40}
@@ -1058,6 +1067,7 @@ func TestHandlePacketIgnoresDuplicateStreamDataWrite(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, 0x10, 0x20, 0x30, 0x40}
@@ -1072,9 +1082,32 @@ func TestHandlePacketIgnoresDuplicateStreamDataWrite(t *testing.T) {
 	synQuery := buildTunnelStreamQuery(t, codec, "a.com", sessionID, sessionCookie, Enums.PACKET_STREAM_SYN, 12, 1, nil)
 	_ = srv.handlePacket(synQuery)
 
-	upstreamConn, peerConn := net.Pipe()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+	defer listener.Close()
+
+	var upstreamConn net.Conn
+	var peerConn net.Conn
+	var connErr error
+	acceptDone := make(chan struct{})
+	go func() {
+		upstreamConn, connErr = listener.Accept()
+		close(acceptDone)
+	}()
+
+	peerConn, err = net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	<-acceptDone
+	if connErr != nil {
+		t.Fatalf("Accept failed: %v", connErr)
+	}
 	defer upstreamConn.Close()
 	defer peerConn.Close()
+
 	if _, ok := srv.streams.AttachUpstream(sessionID, 12, "127.0.0.1", 80, upstreamConn, time.Now()); !ok {
 		t.Fatal("AttachUpstream returned false")
 	}
@@ -1082,15 +1115,21 @@ func TestHandlePacketIgnoresDuplicateStreamDataWrite(t *testing.T) {
 	readDone := make(chan []byte, 2)
 	go func() {
 		buffer := make([]byte, 16)
+		_ = peerConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, _ := peerConn.Read(buffer)
-		readDone <- append([]byte(nil), buffer[:n]...)
-		_ = peerConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-		n, err := peerConn.Read(buffer)
-		if err == nil {
+		if n > 0 {
 			readDone <- append([]byte(nil), buffer[:n]...)
-			return
+		} else {
+			readDone <- nil
 		}
-		readDone <- nil
+
+		_ = peerConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		n2, _ := peerConn.Read(buffer)
+		if n2 > 0 {
+			readDone <- append([]byte(nil), buffer[:n2]...)
+		} else {
+			readDone <- nil
+		}
 	}()
 
 	dataQuery := buildTunnelStreamQuery(t, codec, "a.com", sessionID, sessionCookie, Enums.PACKET_STREAM_DATA, 12, 2, []byte("hello"))
@@ -1117,6 +1156,7 @@ func TestHandlePacketReordersOutOfOrderStreamDataBeforeUpstreamWrite(t *testing.
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, 0x10, 0x20, 0x30, 0x40}
@@ -1186,6 +1226,7 @@ func TestHandlePacketAssemblesFragmentedStreamDataBeforeUpstreamWrite(t *testing
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, 0x10, 0x20, 0x30, 0x40}
@@ -1260,6 +1301,7 @@ func TestHandlePacketResetsUnknownStreamData(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, 0x10, 0x20, 0x30, 0x40}
@@ -1290,6 +1332,7 @@ func TestHandlePacketRespondsToSocks5Syn(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1350,6 +1393,7 @@ func TestHandlePacketAssemblesFragmentedSocks5Syn(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	dialCount := 0
@@ -1429,6 +1473,7 @@ func TestHandlePacketRejectsInvalidSocks5Syn(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, 0x10, 0x20, 0x30, 0x40}
@@ -1460,6 +1505,7 @@ func TestHandlePacketMapsSocks5DialFailure(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 	srv.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
 		return nil, errors.New("connection refused")
@@ -1794,6 +1840,7 @@ func TestHandlePacketRespondsToDNSQueryRequest(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 	srv.resolveDNSQueryFn = func(rawQuery []byte) ([]byte, error) {
 		return DnsParser.BuildServerFailureResponse(rawQuery)
@@ -1874,6 +1921,7 @@ func TestHandlePacketAssemblesFragmentedDNSQueryRequest(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	rawQuery := buildServerTestQuery(0x5555, "example.com", Enums.DNS_RECORD_TYPE_A)
@@ -1963,6 +2011,7 @@ func TestHandlePacketDoesNotReprocessCompletedSingleFragmentDNSQuery(t *testing.
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	rawQuery := buildServerTestQuery(0x6666, "example.com", Enums.DNS_RECORD_TYPE_A)
@@ -2025,6 +2074,7 @@ func TestRemoveDNSQueryFragmentsForSessionClearsPendingAssembly(t *testing.T) {
 		MaxPacketSize:     65535,
 		Domain:            []string{"a.com"},
 		MinVPNLabelLength: 3,
+		ARQWindowSize:     64,
 	}, nil, codec)
 
 	now := time.Unix(1700000000, 0)

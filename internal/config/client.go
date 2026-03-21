@@ -82,6 +82,7 @@ type ClientConfig struct {
 	ResolverAddedServerLogFormat          string            `toml:"RESOLVER_ADDED_SERVER_LOG_FORMAT"`
 	LogLevel                              string            `toml:"LOG_LEVEL"`
 	ARQWindowSize                         int               `toml:"ARQ_WINDOW_SIZE"`
+	MaxInflightPackets                    int               `toml:"MAX_INFLIGHT_PACKETS"`
 	Resolvers                             []ResolverAddress `toml:"-"`
 	ResolverMap                           map[string]int    `toml:"-"`
 }
@@ -148,6 +149,7 @@ func defaultClientConfig() ClientConfig {
 		ResolverAddedServerLogFormat:          "",
 		LogLevel:                              "INFO",
 		ARQWindowSize:                         600,
+		MaxInflightPackets:                    128,
 	}
 }
 
@@ -250,6 +252,7 @@ func LoadClientConfig(filename string) (ClientConfig, error) {
 	cfg.StreamResolverFailoverResendThreshold = clampInt(defaultIntBelow(cfg.StreamResolverFailoverResendThreshold, 1, 2), 1, 64)
 	cfg.StreamResolverFailoverCooldownSec = defaultFloatBelow(cfg.StreamResolverFailoverCooldownSec, 0.1, 1.0)
 	cfg.ARQWindowSize = clampInt(defaultIntBelow(cfg.ARQWindowSize, 1, 600), 1, 4096)
+	cfg.MaxInflightPackets = clampInt(defaultIntBelow(cfg.MaxInflightPackets, 1, 128), 1, 2048)
 
 	if cfg.MinUploadMTU < 0 || cfg.MinDownloadMTU < 0 || cfg.MaxUploadMTU < 0 || cfg.MaxDownloadMTU < 0 {
 		return cfg, fmt.Errorf("mtu values cannot be negative")

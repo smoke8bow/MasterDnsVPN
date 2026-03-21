@@ -716,12 +716,9 @@ func (r *stream0Runtime) dispatchLimit() int {
 	if r == nil || r.client == nil {
 		return 4
 	}
-	limit := r.client.effectiveStreamTXWindow()
+	limit := r.client.cfg.MaxInflightPackets
 	if limit < 4 {
 		limit = 4
-	}
-	if limit > 8 {
-		limit = 8
 	}
 	return limit
 }

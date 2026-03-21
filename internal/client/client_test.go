@@ -1430,8 +1430,32 @@ func TestHandleSOCKS5UDPDatagramResolvesDNS(t *testing.T) {
 }
 
 func TestHandleInboundStreamPacketIgnoresDuplicateData(t *testing.T) {
-	c := New(config.ClientConfig{}, nil, nil)
-	serverConn, clientConn := net.Pipe()
+	c := New(config.ClientConfig{ARQWindowSize: 64}, nil, nil)
+	c.sessionReady = true
+	
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+	defer listener.Close()
+
+	var serverConn net.Conn
+	var clientConn net.Conn
+	var connErr error
+	acceptDone := make(chan struct{})
+	go func() {
+		serverConn, connErr = listener.Accept()
+		close(acceptDone)
+	}()
+
+	clientConn, err = net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	<-acceptDone
+	if connErr != nil {
+		t.Fatalf("Accept failed: %v", connErr)
+	}
 	defer serverConn.Close()
 	defer clientConn.Close()
 
@@ -1446,15 +1470,22 @@ func TestHandleInboundStreamPacketIgnoresDuplicateData(t *testing.T) {
 	writeDone := make(chan []byte, 2)
 	go func() {
 		buffer := make([]byte, 8)
+		// Set a real deadline since we are using a real TCP connection.
+		_ = clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, _ := clientConn.Read(buffer)
-		writeDone <- append([]byte(nil), buffer[:n]...)
-		_ = clientConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-		n, err := clientConn.Read(buffer)
-		if err == nil {
+		if n > 0 {
 			writeDone <- append([]byte(nil), buffer[:n]...)
-			return
+		} else {
+			writeDone <- nil
 		}
-		writeDone <- nil
+
+		_ = clientConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		n2, _ := clientConn.Read(buffer)
+		if n2 > 0 {
+			writeDone <- append([]byte(nil), buffer[:n2]...)
+		} else {
+			writeDone <- nil
+		}
 	}()
 
 	c.exchangeQueryFn = func(conn Connection, packet []byte, timeout time.Duration) ([]byte, error) {
@@ -1477,7 +1508,8 @@ func TestHandleInboundStreamPacketIgnoresDuplicateData(t *testing.T) {
 }
 
 func TestHandleInboundStreamPacketReordersOutOfOrderData(t *testing.T) {
-	c := New(config.ClientConfig{}, nil, nil)
+	c := New(config.ClientConfig{ARQWindowSize: 64}, nil, nil)
+	c.sessionReady = true
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
 	defer clientConn.Close()
@@ -1501,7 +1533,6 @@ func TestHandleInboundStreamPacketReordersOutOfOrderData(t *testing.T) {
 		buffer := make([]byte, 16)
 		collected := make([]byte, 0, 16)
 		for {
-			_ = clientConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 			n, err := clientConn.Read(buffer)
 			if n > 0 {
 				collected = append(collected, buffer[:n]...)

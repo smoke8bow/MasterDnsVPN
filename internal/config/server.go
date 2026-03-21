@@ -193,10 +193,10 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 		cfg.MaxPacketsPerBatch = 20
 	}
 	if cfg.StreamOutboundWindow < 1 {
-		cfg.StreamOutboundWindow = 4
+		cfg.StreamOutboundWindow = 64
 	}
-	if cfg.StreamOutboundWindow > 32 {
-		cfg.StreamOutboundWindow = 32
+	if cfg.StreamOutboundWindow > 2048 {
+		cfg.StreamOutboundWindow = 2048
 	}
 	if cfg.StreamOutboundQueueLimit < 1 {
 		cfg.StreamOutboundQueueLimit = 256
