@@ -234,6 +234,53 @@ func (c *Client) HandleSOCKS5Connect(ctx context.Context, conn net.Conn, addr st
 	}
 }
 
+func (c *Client) getStream(streamID uint16) (*Stream_client, bool) {
+	c.streamsMu.Lock()
+	s, ok := c.active_streams[streamID]
+	c.streamsMu.Unlock()
+	return s, ok
+}
+
+func (c *Client) writeSocksConnectResult(streamID uint16, rep byte) error {
+	s, ok := c.getStream(streamID)
+	if !ok || s == nil || s.NetConn == nil {
+		return nil
+	}
+
+	if rep == SOCKS5_REPLY_SUCCESS {
+		s.Status = "ACTIVE"
+	} else {
+		s.Status = "CLOSED"
+	}
+
+	return c.sendSocksReply(s.NetConn, rep, SOCKS5_ATYP_IPV4, net.IPv4zero, 0)
+}
+
+func socksReplyForPacketType(packetType uint8) byte {
+	switch packetType {
+	case Enums.PACKET_SOCKS5_RULESET_DENIED:
+		return SOCKS5_REPLY_RULESET_DENIED
+	case Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE:
+		return SOCKS5_REPLY_NETWORK_UNREACHABLE
+	case Enums.PACKET_SOCKS5_HOST_UNREACHABLE:
+		return SOCKS5_REPLY_HOST_UNREACHABLE
+	case Enums.PACKET_SOCKS5_CONNECTION_REFUSED:
+		return SOCKS5_REPLY_CONNECTION_REFUSED
+	case Enums.PACKET_SOCKS5_TTL_EXPIRED:
+		return SOCKS5_REPLY_TTL_EXPIRED
+	case Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED:
+		return SOCKS5_REPLY_CMD_NOT_SUPPORTED
+	case Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED:
+		return SOCKS5_REPLY_ATYP_NOT_SUPPORTED
+	case Enums.PACKET_SOCKS5_AUTH_FAILED,
+		Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE,
+		Enums.PACKET_SOCKS5_CONNECT_FAIL:
+		return SOCKS5_REPLY_GENERAL_FAILURE
+	default:
+		return SOCKS5_REPLY_GENERAL_FAILURE
+	}
+}
+
 func (c *Client) CloseStream(streamID uint16) {
 	c.streamsMu.Lock()
 	s, ok := c.active_streams[streamID]
@@ -353,16 +400,27 @@ func (c *Client) handleSocksUDPAssociate(ctx context.Context, conn net.Conn, cli
 }
 
 func (c *Client) HandleSocksConnected(packet VpnProto.Packet) error {
+	if err := c.writeSocksConnectResult(packet.StreamID, SOCKS5_REPLY_SUCCESS); err != nil {
+		c.CloseStream(packet.StreamID)
+		return err
+	}
+
 	arqObj, err := c.getStreamARQ(packet.StreamID)
 	if err == nil {
 		arqObj.MarkSocksConnected()
 		arqObj.SendControlPacket(Enums.PACKET_SOCKS5_CONNECTED_ACK, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, nil, 0, false, nil)
 	}
+
 	c.log.Infof("🔌 <green>Socks5 successfully connected for stream %d</green>", packet.StreamID)
 	return nil
 }
 
 func (c *Client) HandleSocksFailure(packet VpnProto.Packet) error {
+	if err := c.writeSocksConnectResult(packet.StreamID, socksReplyForPacketType(packet.PacketType)); err != nil {
+		c.CloseStream(packet.StreamID)
+		return err
+	}
+
 	arqObj, err := c.getStreamARQ(packet.StreamID)
 
 	if err != nil {
