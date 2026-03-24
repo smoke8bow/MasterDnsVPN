@@ -287,7 +287,7 @@ func (c *Client) Run(ctx context.Context) error {
 					select {
 					case <-ctx.Done():
 						return nil
-					case <-time.After(time.Second * 5):
+					case <-time.After(time.Second * 1):
 					}
 					continue
 				}

@@ -506,8 +506,21 @@ func (c *Client) sendSocksReply(conn net.Conn, rep byte, atyp byte, bndAddr net.
 }
 
 func (c *Client) handleSocksUDPAssociate(ctx context.Context, conn net.Conn, clientAddr string, clientPort uint16, atyp byte) {
+	replyIP := net.ParseIP(c.cfg.ListenIP)
+	if tcpAddr, ok := conn.LocalAddr().(*net.TCPAddr); ok && tcpAddr != nil && tcpAddr.IP != nil {
+		replyIP = tcpAddr.IP
+	}
+	if replyIP == nil || replyIP.IsUnspecified() {
+		replyIP = net.IPv4(127, 0, 0, 1)
+	}
+
+	replyATYP := byte(SOCKS5_ATYP_IPV4)
+	if replyIP.To4() == nil {
+		replyATYP = SOCKS5_ATYP_IPV6
+	}
+
 	bindAddr := &net.UDPAddr{
-		IP:   net.ParseIP(c.cfg.ListenIP),
+		IP:   net.IPv4zero,
 		Port: 0,
 	}
 	udpConn, err := net.ListenUDP("udp", bindAddr)
@@ -518,18 +531,19 @@ func (c *Client) handleSocksUDPAssociate(ctx context.Context, conn net.Conn, cli
 	defer udpConn.Close()
 
 	boundAddr := udpConn.LocalAddr().(*net.UDPAddr)
-	err = c.sendSocksReply(conn, SOCKS5_REPLY_SUCCESS, SOCKS5_ATYP_IPV4, boundAddr.IP, uint16(boundAddr.Port))
+	err = c.sendSocksReply(conn, SOCKS5_REPLY_SUCCESS, replyATYP, boundAddr.IP, uint16(boundAddr.Port))
 	if err != nil {
 		return
 	}
-
-	c.log.Debugf("📡 <green>SOCKS5 UDP Associate established on <cyan>%s</cyan></green>", boundAddr.String())
 
 	buf := make([]byte, 4096)
 	for {
 		_ = udpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		n, peerAddr, err := udpConn.ReadFromUDP(buf)
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				return
+			}
 			return
 		}
 
@@ -559,6 +573,10 @@ func (c *Client) handleSocksUDPAssociate(ctx context.Context, conn net.Conn, cli
 			targetAddr = net.IP(buf[4:20]).String()
 			targetPort = binary.BigEndian.Uint16(buf[20:22])
 		default:
+			continue
+		}
+
+		if payloadOffset > n {
 			continue
 		}
 

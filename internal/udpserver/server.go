@@ -1698,9 +1698,10 @@ func (s *Server) handleDNSQueryRequest(decision domainMatcher.Decision, vpnPacke
 }
 
 func (s *Server) handleDNSQueryResponseAck(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
-	if sessionRecord == nil || vpnPacket.StreamID != 0 || !vpnPacket.HasSequenceNum {
+	if sessionRecord == nil {
 		return false
 	}
+
 	totalFragments := vpnPacket.TotalFragments
 	if totalFragments == 0 {
 		totalFragments = 1

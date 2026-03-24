@@ -242,7 +242,7 @@ func (c *Client) ProcessDNSQuery(query []byte, addr net.Addr, respond func([]byt
 				respond(resp)
 			}
 			if c.log != nil {
-				c.log.Debugf("🔍 <green>DNS Cache Hit: %s (%d)</green>", question.Name, question.Type)
+				c.log.Infof("🔍 <green>DNS Cache Hit: %s (%d)</green>", question.Name, question.Type)
 			}
 			return true
 		}
@@ -257,6 +257,7 @@ func (c *Client) ProcessDNSQuery(query []byte, addr net.Addr, respond func([]byt
 	}
 
 	// 3. Dispatch to Tunnel
+	c.log.Infof("🔍 <yellow>DNS Query Request: %s (%d)</yellow>", question.Name, question.Type)
 	c.dispatchDNSQueryToTunnel(query)
 	return false
 }
