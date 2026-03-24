@@ -217,9 +217,5 @@ func (c *Client) exchangeDNSOverConnection(conn Connection, query []byte, timeou
 		return VpnProto.Packet{}, err
 	}
 
-	if !c.validateServerPacket(packet) {
-		return VpnProto.Packet{}, errors.New("invalid VPN packet")
-	}
-
 	return packet, nil
 }

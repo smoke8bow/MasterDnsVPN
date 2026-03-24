@@ -7,6 +7,8 @@
 
 package enums
 
+import "slices"
+
 // ControlAckPairs centralizes the deterministic ACK/response packet type for
 // control/setup packets. Data ACKs intentionally remain inside ARQ.
 var ControlAckPairs = map[uint8]uint8{
@@ -29,6 +31,25 @@ var ControlAckPairs = map[uint8]uint8{
 	PACKET_SOCKS5_AUTH_FAILED:              PACKET_SOCKS5_AUTH_FAILED_ACK,
 	PACKET_SOCKS5_UPSTREAM_UNAVAILABLE:     PACKET_SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
 	PACKET_SOCKS5_CONNECTED:                PACKET_SOCKS5_CONNECTED_ACK,
+}
+
+var PacketsCloseStream = []uint8{
+	PACKET_STREAM_RST_ACK,
+	// PACKET_STREAM_FIN_ACK,
+	PACKET_SOCKS5_RULESET_DENIED_ACK,
+	PACKET_SOCKS5_NETWORK_UNREACHABLE_ACK,
+	PACKET_SOCKS5_HOST_UNREACHABLE_ACK,
+	PACKET_SOCKS5_CONNECTION_REFUSED_ACK,
+	PACKET_SOCKS5_TTL_EXPIRED_ACK,
+	PACKET_SOCKS5_COMMAND_UNSUPPORTED_ACK,
+	PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED_ACK,
+	PACKET_SOCKS5_AUTH_FAILED_ACK,
+	PACKET_SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
+	PACKET_STREAM_CONNECT_FAIL_ACK,
+}
+
+func IsPacketCloseStream(packetType uint8) bool {
+	return slices.Contains(PacketsCloseStream, packetType)
 }
 
 var reverseControlAckPairs map[uint8]uint8

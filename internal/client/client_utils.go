@@ -96,32 +96,6 @@ func (c *Client) Log() *logger.Logger {
 	return c.log
 }
 
-// validateServerPacket checks if the incoming VPN packet is valid for the current session.
-func (c *Client) validateServerPacket(packet VpnProto.Packet) bool {
-	// For MTU and initial handshake, we might not have a session ready
-	if isPreSessionResponseType(packet.PacketType) {
-		return true
-	}
-	// In this minimal version, we might not have session state yet,
-	// so we'll just return true for now to allow MTU tests to pass.
-	// Once session logic is added, we will restore the proper check.
-	return true
-}
-
-// isPreSessionResponseType returns true if the packet type is expected before a session is fully established.
-func isPreSessionResponseType(packetType uint8) bool {
-	switch packetType {
-	case Enums.PACKET_MTU_UP_RES,
-		Enums.PACKET_MTU_DOWN_RES,
-		Enums.PACKET_SESSION_ACCEPT,
-		Enums.PACKET_SESSION_BUSY,
-		Enums.PACKET_ERROR_DROP:
-		return true
-	default:
-		return false
-	}
-}
-
 // initResolverRecheckMeta initializes metadata for resolver health monitoring.
 func (c *Client) initResolverRecheckMeta() {
 	// Recheck logic not fully implemented yet
@@ -184,24 +158,7 @@ func (c *Client) clearOrphanResets() {
 	c.orphanQueue.Clear(nil)
 }
 
-func (c *Client) handleMissingStreamPacket(packet VpnProto.Packet) {
-	if c == nil || !packet.HasStreamID || packet.StreamID == 0 {
-		return
-	}
-
-	switch packet.PacketType {
-	case Enums.PACKET_STREAM_FIN:
-		c.enqueueOrphanReset(Enums.PACKET_STREAM_FIN_ACK, packet.StreamID, packet.SequenceNum)
-	case Enums.PACKET_STREAM_RST:
-		c.enqueueOrphanReset(Enums.PACKET_STREAM_RST_ACK, packet.StreamID, packet.SequenceNum)
-	case Enums.PACKET_STREAM_FIN_ACK, Enums.PACKET_STREAM_RST_ACK:
-		return
-	default:
-		c.enqueueOrphanReset(Enums.PACKET_STREAM_RST, packet.StreamID, 0)
-	}
-}
-
-func (c *Client) queueImmediateControlAck(streamID uint16, packet VpnProto.Packet) bool {
+func (c *Client) queueImmediateControlAck(stream *Stream_client, packet VpnProto.Packet) bool {
 	if c == nil {
 		return false
 	}
@@ -211,14 +168,11 @@ func (c *Client) queueImmediateControlAck(streamID uint16, packet VpnProto.Packe
 		return false
 	}
 
-	c.streamsMu.RLock()
-	s := c.active_streams[streamID]
-	c.streamsMu.RUnlock()
-	if s == nil || s.txQueue == nil {
+	if stream == nil || stream.txQueue == nil {
 		return false
 	}
 
-	ok = s.PushTXPacket(
+	ok = stream.PushTXPacket(
 		Enums.DefaultPacketPriority(ackType),
 		ackType,
 		packet.SequenceNum,
@@ -232,37 +186,66 @@ func (c *Client) queueImmediateControlAck(streamID uint16, packet VpnProto.Packe
 	return ok
 }
 
-func isStreamScopedAckPacket(packetType uint8) bool {
-	if packetType == Enums.PACKET_STREAM_DATA_ACK {
-		return true
-	}
-	_, ok := Enums.ReverseControlAckFor(packetType)
-	return ok
-}
-
-func (c *Client) consumeInboundStreamAck(packet VpnProto.Packet, s *Stream_client) {
+func (c *Client) consumeInboundStreamAck(packetType uint8, packet VpnProto.Packet, s *Stream_client) bool {
 	if c == nil || s == nil {
-		return
+		return false
+	}
+
+	_, ack_required := Enums.ReverseControlAckFor(packetType)
+	if packetType != Enums.PACKET_STREAM_DATA_ACK && !ack_required {
+		return false
 	}
 
 	arqObj, ok := s.Stream.(*arq.ARQ)
 	if !ok {
-		return
+		return false
 	}
 
 	handledAck := arqObj.HandleAckPacket(packet.PacketType, packet.SequenceNum, packet.FragmentID)
 
-	switch packet.PacketType {
-	case Enums.PACKET_STREAM_FIN_ACK, Enums.PACKET_STREAM_RST_ACK:
-		if handledAck {
-			if s.StatusValue() == streamStatusCancelled || arqObj.IsClosed() {
-				s.MarkTerminal(time.Now())
-				if s.StatusValue() != streamStatusCancelled {
-					s.SetStatus(streamStatusTimeWait)
-				}
+	if handledAck && (Enums.IsPacketCloseStream(packet.PacketType) || packet.PacketType == Enums.PACKET_STREAM_FIN_ACK) {
+		if s.StatusValue() == streamStatusCancelled || arqObj.IsClosed() {
+			s.MarkTerminal(time.Now())
+			if s.StatusValue() != streamStatusCancelled {
+				s.SetStatus(streamStatusTimeWait)
 			}
 		}
 	}
+
+	if handledAck {
+		return true
+	}
+
+	return false
+}
+
+func (c *Client) getStream(streamID uint16) (*Stream_client, bool) {
+	c.streamsMu.Lock()
+	s, ok := c.active_streams[streamID]
+	c.streamsMu.Unlock()
+	return s, ok
+}
+
+func (c *Client) handleMissingStreamPacket(packet VpnProto.Packet) bool {
+	if c == nil {
+		return false
+	}
+
+	// No need to send Response for ACK packets
+	if _, ok := Enums.ReverseControlAckFor(packet.PacketType); ok {
+		return true
+	}
+
+	switch packet.PacketType {
+	case Enums.PACKET_STREAM_FIN:
+		c.enqueueOrphanReset(Enums.PACKET_STREAM_FIN_ACK, packet.StreamID, packet.SequenceNum)
+	case Enums.PACKET_STREAM_RST:
+		c.enqueueOrphanReset(Enums.PACKET_STREAM_RST_ACK, packet.StreamID, packet.SequenceNum)
+	default:
+		c.enqueueOrphanReset(Enums.PACKET_STREAM_RST, packet.StreamID, 0)
+	}
+
+	return true
 }
 
 func (c *Client) preprocessInboundPacket(packet VpnProto.Packet) bool {
@@ -270,30 +253,18 @@ func (c *Client) preprocessInboundPacket(packet VpnProto.Packet) bool {
 		return true
 	}
 
-	switch packet.PacketType {
-	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
-		return false
+	exists_stream, stream_exists := c.getStream(packet.StreamID)
+	if packet.StreamID != 0 && (!stream_exists || exists_stream == nil) {
+		c.handleMissingStreamPacket(packet)
+		return true
 	}
 
-	if packet.HasStreamID && packet.StreamID != 0 {
-		c.streamsMu.RLock()
-		s, ok := c.active_streams[packet.StreamID]
-		c.streamsMu.RUnlock()
-		if !ok {
-			c.handleMissingStreamPacket(packet)
-			return true
-		}
+	// Add ACK to queue if thats control packet
+	_ = c.queueImmediateControlAck(exists_stream, packet)
 
-		_ = c.queueImmediateControlAck(packet.StreamID, packet)
-		if isStreamScopedAckPacket(packet.PacketType) {
-			c.consumeInboundStreamAck(packet, s)
-			return true
-		}
-		return false
-	}
-
-	if _, ok := Enums.ControlAckFor(packet.PacketType); ok {
-		_ = c.queueImmediateControlAck(0, packet)
+	// Handle all control packets
+	if c.consumeInboundStreamAck(packet.PacketType, packet, exists_stream) {
+		return true
 	}
 
 	return false

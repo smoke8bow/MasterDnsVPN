@@ -266,13 +266,6 @@ func (c *Client) HandleSOCKS5Connect(ctx context.Context, conn net.Conn, addr st
 	}
 }
 
-func (c *Client) getStream(streamID uint16) (*Stream_client, bool) {
-	c.streamsMu.Lock()
-	s, ok := c.active_streams[streamID]
-	c.streamsMu.Unlock()
-	return s, ok
-}
-
 func (c *Client) writeSocksConnectResult(streamID uint16, rep byte) error {
 	s, ok := c.getStream(streamID)
 	if !ok || s == nil || s.NetConn == nil {
@@ -490,7 +483,6 @@ func (c *Client) handleSocksUDPAssociate(ctx context.Context, conn net.Conn, cli
 func (c *Client) HandleSocksConnected(packet VpnProto.Packet) error {
 	s, ok := c.getStream(packet.StreamID)
 	if !ok || s == nil {
-		c.handleMissingStreamPacket(packet)
 		return nil
 	}
 
@@ -539,7 +531,6 @@ func (c *Client) HandleSocksConnected(packet VpnProto.Packet) error {
 func (c *Client) HandleSocksFailure(packet VpnProto.Packet) error {
 	s, ok := c.getStream(packet.StreamID)
 	if !ok || s == nil {
-		c.handleMissingStreamPacket(packet)
 		return nil
 	}
 
@@ -587,7 +578,6 @@ func (c *Client) HandleSocksControlAck(packet VpnProto.Packet) error {
 	arqObj, err := c.getStreamARQ(packet.StreamID)
 
 	if err != nil {
-		c.handleMissingStreamPacket(packet)
 		return nil
 	}
 

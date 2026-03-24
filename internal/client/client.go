@@ -327,7 +327,6 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 	c.streamsMu.Unlock()
 
 	if !ok || s == nil {
-		c.handleMissingStreamPacket(packet)
 		return nil
 	}
 
@@ -350,7 +349,7 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 		}
 	default:
 		handledAck := arqObj.HandleAckPacket(packet.PacketType, packet.SequenceNum, packet.FragmentID)
-		if handledAck && (packet.PacketType == Enums.PACKET_STREAM_RST_ACK || packet.PacketType == Enums.PACKET_STREAM_FIN_ACK) {
+		if handledAck && (Enums.IsPacketCloseStream(packet.PacketType) || packet.PacketType == Enums.PACKET_STREAM_DATA_ACK) {
 			if s.StatusValue() == streamStatusCancelled || arqObj.IsClosed() {
 				s.MarkTerminal(time.Now())
 				if s.StatusValue() != streamStatusCancelled {

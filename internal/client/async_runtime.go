@@ -337,12 +337,7 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 		return
 	}
 
-	// 2. Security Validation
-	if !c.validateServerPacket(vpnPacket) {
-		return
-	}
-
-	// 3. Queue deterministic non-data ACKs before any handler logic runs.
+	// 2. Queue deterministic non-data ACKs before any handler logic runs.
 	if handled := c.preprocessInboundPacket(vpnPacket); handled {
 		return
 	}

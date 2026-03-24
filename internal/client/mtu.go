@@ -491,17 +491,6 @@ func (c *Client) sendUploadMTUProbe(ctx context.Context, conn *Connection, probe
 		)
 		return false, nil
 	}
-	if !c.validateServerPacket(packet) {
-		c.logMTUProbe(
-			options.IsRetry,
-			options.Quiet,
-			"<yellow>⚠️ Upload test failed: Upload MTU <cyan>%d</cyan> bytes via <cyan>%s</cyan> for <cyan>%s</cyan></yellow>",
-			mtuSize,
-			conn.ResolverLabel,
-			conn.Domain,
-		)
-		return false, nil
-	}
 	if packet.PacketType != Enums.PACKET_MTU_UP_RES {
 		c.logMTUProbe(
 			options.IsRetry,
@@ -614,17 +603,7 @@ func (c *Client) sendDownloadMTUProbe(ctx context.Context, conn *Connection, pro
 		)
 		return false, nil
 	}
-	if !c.validateServerPacket(packet) {
-		c.logMTUProbe(
-			options.IsRetry,
-			options.Quiet,
-			"<yellow>⚠️ Download test failed: Download MTU <cyan>%d</cyan> bytes via <cyan>%s</cyan> for <cyan>%s</cyan> (Unexpected Packet Type)</yellow>",
-			mtuSize,
-			conn.ResolverLabel,
-			conn.Domain,
-		)
-		return false, nil
-	}
+
 	if packet.PacketType != Enums.PACKET_MTU_DOWN_RES {
 		c.logMTUProbe(
 			options.IsRetry,
