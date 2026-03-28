@@ -559,7 +559,9 @@ func (a *ARQ) clearAllQueues(clearControl bool) {
 	if clearControl {
 		a.controlSndBuf = make(map[uint32]*arqControlItem)
 	}
+	a.dataNackMu.Lock()
 	clear(a.lastDataNackSent)
+	a.dataNackMu.Unlock()
 
 	a.signalWindowNotFull()
 }
