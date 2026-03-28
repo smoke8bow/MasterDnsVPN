@@ -520,6 +520,7 @@ func isDeferredPostSessionPacketType(packetType uint8) bool {
 		Enums.PACKET_STREAM_SYN,
 		Enums.PACKET_SOCKS5_SYN,
 		Enums.PACKET_STREAM_DATA,
+		Enums.PACKET_STREAM_DATA_NACK,
 		Enums.PACKET_STREAM_RESEND:
 		return true
 	default:

@@ -561,11 +561,11 @@ func TestARQ_HandleDataNackQueuesImmediateResend(t *testing.T) {
 	if info == nil {
 		t.Fatal("expected sequence 7 to remain tracked")
 	}
-	if info.Retries != 1 {
-		t.Fatalf("expected retry count 1 after NACK resend, got %d", info.Retries)
+	if info.Retries != 0 {
+		t.Fatalf("expected NACK resend to leave retry count unchanged, got %d", info.Retries)
 	}
-	if info.CurrentRTO <= a.rto {
-		t.Fatalf("expected CurrentRTO to grow after NACK resend, got %s", info.CurrentRTO)
+	if info.CurrentRTO != a.rto {
+		t.Fatalf("expected NACK resend to leave CurrentRTO unchanged, got %s", info.CurrentRTO)
 	}
 }
 
@@ -621,6 +621,26 @@ func TestARQ_ReceiveDataClearsQueuedNackWhenMissingDataArrives(t *testing.T) {
 	defer enqueuer.mu.Unlock()
 	if len(enqueuer.removedNackSeqs) != 1 || enqueuer.removedNackSeqs[0] != 0 {
 		t.Fatalf("expected queued NACK purge for seq 0, got %#v", enqueuer.removedNackSeqs)
+	}
+}
+
+func TestARQ_ClearAllQueuesDropsRememberedDataNacks(t *testing.T) {
+	a := NewARQ(1, 1, NewMockPacketEnqueuer(), nil, 1000, &testLogger{t}, Config{
+		DataNackMaxGap:        2,
+		DataNackRepeatSeconds: 2.0,
+	})
+
+	a.noteDataNackSent(10, time.Now())
+	a.noteDataNackSent(11, time.Now())
+
+	a.mu.Lock()
+	a.clearAllQueues(true)
+	a.mu.Unlock()
+
+	a.dataNackMu.Lock()
+	defer a.dataNackMu.Unlock()
+	if len(a.lastDataNackSent) != 0 {
+		t.Fatalf("expected remembered data NACK state to be cleared, got %#v", a.lastDataNackSent)
 	}
 }
 

@@ -512,6 +512,7 @@ func (a *ARQ) clearAllQueues(clearControl bool) {
 	if clearControl {
 		a.controlSndBuf = make(map[uint32]*arqControlItem)
 	}
+	clear(a.lastDataNackSent)
 
 	a.signalWindowNotFull()
 }
@@ -1227,17 +1228,7 @@ func (a *ARQ) HandleDataNack(sn uint16) bool {
 	if !ok {
 		return false
 	}
-
-	a.mu.Lock()
-	info, exists = a.sndBuf[sn]
-	if exists {
-		info.LastSentAt = now
-		info.Retries++
-		grownRTO := time.Duration(float64(info.CurrentRTO) * 1.2)
-		info.CurrentRTO = time.Duration(minF(float64(a.maxRTO), maxF(float64(a.rto), float64(grownRTO))))
-	}
-	a.mu.Unlock()
-	return exists
+	return true
 }
 
 func (a *ARQ) maybeSendDataNacks(sn uint16) {
