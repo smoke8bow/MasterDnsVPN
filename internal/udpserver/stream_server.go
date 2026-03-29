@@ -246,20 +246,50 @@ func (s *Stream_server) OnARQClosed(reason string) {
 	s.finalizeAfterARQClose(reason)
 }
 
+func (s *Stream_server) closeUpstreamOnly(status string) {
+	if s == nil {
+		return
+	}
+
+	var upstream io.ReadWriteCloser
+
+	s.mu.Lock()
+	if status != "" {
+		s.Status = status
+	} else if s.Status != "CLOSED" {
+		s.Status = "CLOSING"
+	}
+	s.CloseTime = time.Now()
+	s.Connected = false
+	upstream = s.UpstreamConn
+	s.UpstreamConn = nil
+	s.mu.Unlock()
+
+	if upstream != nil {
+		_ = upstream.Close()
+	}
+}
+
 func (s *Stream_server) CloseStream(force bool, ttl time.Duration, reason string) {
 	if s == nil {
 		return
 	}
 
 	if s.ARQ != nil {
-		s.ARQ.Close(reason, arq.CloseOptions{
-			Force:   force,
-			SendRST: !force,
-			TTL:     ttl,
-		})
 		if force {
-			s.finalizeAfterARQClose(reason)
+			s.closeUpstreamOnly("CLOSED")
+			s.ARQ.Close(reason, arq.CloseOptions{
+				SendRST: true,
+				TTL:     ttl,
+			})
+			return
 		}
+
+		s.ARQ.Close(reason, arq.CloseOptions{
+			SendCloseRead: true,
+			AfterDrain:    true,
+			TTL:           ttl,
+		})
 		return
 	}
 

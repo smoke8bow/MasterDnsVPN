@@ -331,6 +331,7 @@ dispatchLoop:
 		c.pingManager.NotifyPacket(finalPacket.packetType, false)
 		finalPacket.streamID = selectedStreamID
 
+		// var isLogged bool = false
 		for _, conn := range conns {
 			domain := conn.Domain
 			if domain == "" {
@@ -375,6 +376,10 @@ dispatchLoop:
 
 			select {
 			case c.txChannel <- pkt:
+				// if !isLogged && pkt.packetType != Enums.PACKET_PING {
+				// 	c.log.Warnf("<cyan>Sending Packet, Packet: Packet: %s | Session %d | Payload Len(%d) | Stream: %d | Seq: %d | Fg: %d | TF: %d</cyan>", Enums.PacketTypeName(opts.PacketType), opts.SessionID, len(opts.Payload), opts.StreamID, opts.SequenceNum, opts.FragmentID, opts.TotalFragments)
+				// }
+				// isLogged = true
 			default:
 				c.log.Warnf("TX channel filled before enqueue completed | Packet: %s | Stream: %d", Enums.PacketTypeName(finalPacket.packetType), selectedStreamID)
 			}

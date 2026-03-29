@@ -672,7 +672,8 @@ func (r *sessionRecord) getOrCreateStream(streamID uint16, arqConfig arq.Config,
 }
 
 func shouldSuppressServerOrphanForCloseReason(reason string) bool {
-	return reason == "FIN handshake completed" || strings.HasSuffix(reason, "acknowledged")
+	return strings.Contains(reason, "close handshake completed") ||
+		strings.HasSuffix(reason, "acknowledged")
 }
 
 func (r *sessionRecord) onStreamClosed(streamID uint16, now time.Time, reason string) {
@@ -838,6 +839,7 @@ func (r *sessionRecord) closeAllStreams(reason string) {
 
 	for _, stream := range streams {
 		stream.Abort(reason)
+		stream.finalizeAfterARQClose(reason)
 	}
 
 	r.StreamsMu.Lock()
@@ -879,12 +881,13 @@ func (r *sessionRecord) cleanupTerminalStreams(now time.Time, retention time.Dur
 			stream.Status = "TIME_WAIT"
 		}
 
-		if stream.ARQ.IsClosed() {
+		forceClosedExpired := !stream.CloseTime.IsZero() && now.Sub(stream.CloseTime) >= retention
+		if stream.ARQ.IsClosed() || forceClosedExpired {
 			if stream.CloseTime.IsZero() {
 				stream.CloseTime = now
 			}
 			stream.Status = "TIME_WAIT"
-			if now.Sub(stream.CloseTime) >= retention {
+			if forceClosedExpired || now.Sub(stream.CloseTime) >= retention {
 				removeIDs = append(removeIDs, streamID)
 			}
 		}
@@ -894,6 +897,7 @@ func (r *sessionRecord) cleanupTerminalStreams(now time.Time, retention time.Dur
 	for _, streamID := range removeIDs {
 		if stream, ok := snapshot[streamID]; ok && stream != nil {
 			stream.Abort("terminal stream retention cleanup")
+			stream.finalizeAfterARQClose("terminal stream retention cleanup")
 		}
 		r.removeStream(streamID, now, false)
 	}

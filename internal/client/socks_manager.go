@@ -446,9 +446,6 @@ func socksReplyForPacketType(packetType uint8) byte {
 func (c *Client) CloseStream(streamID uint16, force bool, ttl time.Duration) {
 	c.streamsMu.Lock()
 	s, ok := c.active_streams[streamID]
-	if force {
-		delete(c.active_streams, streamID)
-	}
 	c.streamsMu.Unlock()
 
 	if ok {
@@ -487,7 +484,7 @@ func (c *Client) handlePendingSOCKSLocalClose(streamID uint16, reason string) {
 
 	arqObj, err := c.getStreamARQ(streamID)
 	if err == nil {
-		arqObj.Close(reason, arq.CloseOptions{Force: true})
+		arqObj.Close(reason, arq.CloseOptions{SendRST: true})
 	}
 }
 
@@ -642,7 +639,7 @@ func (c *Client) HandleSocksConnected(packet VpnProto.Packet) error {
 	if ok && s.StatusValue() == streamStatusCancelled {
 		s.socksResultMu.Unlock()
 		if arqObj, err := c.getStreamARQ(packet.StreamID); err == nil {
-			arqObj.Close("late SOCKS success after local cancellation", arq.CloseOptions{Force: true})
+			arqObj.Close("late SOCKS success after local cancellation", arq.CloseOptions{SendRST: true})
 		}
 		return nil
 	}
@@ -652,7 +649,7 @@ func (c *Client) HandleSocksConnected(packet VpnProto.Packet) error {
 	if err != nil {
 		if errors.Is(err, errLateSocksResult) {
 			if arqObj, arqErr := c.getStreamARQ(packet.StreamID); arqErr == nil {
-				arqObj.Close("late SOCKS success result", arq.CloseOptions{Force: true})
+				arqObj.Close("late SOCKS success result", arq.CloseOptions{SendRST: true})
 			}
 			return nil
 		}
@@ -686,7 +683,7 @@ func (c *Client) HandleSocksFailure(packet VpnProto.Packet) error {
 		s.socksResultMu.Unlock()
 		arqObj, err := c.getStreamARQ(packet.StreamID)
 		if err == nil {
-			arqObj.Close("SOCKS failure received after local cancellation", arq.CloseOptions{Force: true})
+			arqObj.Close("SOCKS failure received after local cancellation", arq.CloseOptions{SendRST: true})
 		}
 		return nil
 	}
@@ -696,7 +693,7 @@ func (c *Client) HandleSocksFailure(packet VpnProto.Packet) error {
 	if err != nil {
 		if errors.Is(err, errLateSocksResult) {
 			if arqObj, arqErr := c.getStreamARQ(packet.StreamID); arqErr == nil {
-				arqObj.Close("late SOCKS failure result", arq.CloseOptions{Force: true})
+				arqObj.Close("late SOCKS failure result", arq.CloseOptions{SendRST: true})
 			}
 			return nil
 		}

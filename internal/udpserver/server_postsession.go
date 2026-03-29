@@ -56,8 +56,10 @@ func (s *Server) dispatchPostSessionPacket(vpnPacket VpnProto.Packet, sessionRec
 		return s.handleStreamSynRequest(vpnPacket, sessionRecord)
 	case Enums.PACKET_SOCKS5_SYN:
 		return s.handleSOCKS5SynRequest(vpnPacket, sessionRecord)
-	case Enums.PACKET_STREAM_FIN:
-		return s.handleStreamFinRequest(vpnPacket)
+	case Enums.PACKET_STREAM_CLOSE_READ:
+		return s.handleStreamCloseReadRequest(vpnPacket)
+	case Enums.PACKET_STREAM_CLOSE_WRITE:
+		return s.handleStreamCloseWriteRequest(vpnPacket)
 	case Enums.PACKET_STREAM_RST:
 		return s.handleStreamRSTRequest(vpnPacket)
 	default:
@@ -89,12 +91,33 @@ func (s *Server) enqueueMissingStreamReset(record *sessionRecord, vpnPacket VpnP
 	}
 
 	ack_answer, ok := Enums.GetPacketCloseStream(vpnPacket.PacketType)
-	if ok && vpnPacket.PacketType != Enums.PACKET_STREAM_FIN {
+	if ok {
 		record.enqueueOrphanReset(ack_answer, vpnPacket.StreamID, 0)
 	} else {
 		record.enqueueOrphanReset(Enums.PACKET_STREAM_RST, vpnPacket.StreamID, 0)
 	}
 	return true
+}
+
+func (s *Server) ackRecentlyClosedStreamPacket(record *sessionRecord, vpnPacket VpnProto.Packet) bool {
+	if s == nil || record == nil || vpnPacket.StreamID == 0 {
+		return false
+	}
+
+	if vpnPacket.PacketType == Enums.PACKET_STREAM_DATA_ACK || vpnPacket.PacketType == Enums.PACKET_STREAM_DATA_NACK {
+		return true
+	}
+
+	if _, ok := Enums.ReverseControlAckFor(vpnPacket.PacketType); ok {
+		return true
+	}
+
+	if ackType, ok := Enums.ControlAckFor(vpnPacket.PacketType); ok {
+		record.enqueueOrphanReset(ackType, vpnPacket.StreamID, vpnPacket.SequenceNum)
+		return true
+	}
+
+	return false
 }
 
 func isStreamCreationPacketType(packetType uint8) bool {
@@ -207,7 +230,13 @@ func (s *Server) preprocessInboundPacket(vpnPacket VpnProto.Packet) bool {
 		case Enums.PACKET_STREAM_SYN, Enums.PACKET_SOCKS5_SYN:
 			record.enqueueOrphanReset(Enums.PACKET_STREAM_RST, vpnPacket.StreamID, 0)
 			return true
+		case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
+			record.enqueueOrphanReset(Enums.PACKET_STREAM_RST, vpnPacket.StreamID, 0)
+			return true
 		default:
+			if s.ackRecentlyClosedStreamPacket(record, vpnPacket) {
+				return true
+			}
 			if record.shouldSuppressOrphanForClosedStream(vpnPacket.StreamID, time.Now()) {
 				return true
 			}
@@ -566,7 +595,17 @@ func (s *Server) handleStreamDataRequest(vpnPacket VpnProto.Packet) bool {
 		return true
 	}
 
-	stream.ARQ.ReceiveData(vpnPacket.SequenceNum, vpnPacket.Payload)
+	if stream.ARQ == nil {
+		record.enqueueOrphanReset(Enums.PACKET_STREAM_RST, vpnPacket.StreamID, 0)
+		return true
+	}
+
+	if stream.ARQ.IsClosed() || stream.ARQ.IsReset() {
+		record.enqueueOrphanReset(Enums.PACKET_STREAM_RST, vpnPacket.StreamID, 0)
+		return true
+	}
+
+	_ = stream.ARQ.ReceiveData(vpnPacket.SequenceNum, vpnPacket.Payload)
 	return true
 }
 
@@ -585,7 +624,7 @@ func (s *Server) handleStreamDataNackRequest(vpnPacket VpnProto.Packet) bool {
 	return true
 }
 
-func (s *Server) handleStreamFinRequest(vpnPacket VpnProto.Packet) bool {
+func (s *Server) handleStreamCloseReadRequest(vpnPacket VpnProto.Packet) bool {
 	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 {
 		return false
 	}
@@ -601,7 +640,27 @@ func (s *Server) handleStreamFinRequest(vpnPacket VpnProto.Packet) bool {
 	}
 
 	s.clearDeferredPacketsForStream(vpnPacket.SessionID, vpnPacket.StreamID)
-	stream.ARQ.MarkFinReceived()
+	stream.ARQ.MarkCloseReadReceived()
+	return true
+}
+
+func (s *Server) handleStreamCloseWriteRequest(vpnPacket VpnProto.Packet) bool {
+	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 {
+		return false
+	}
+
+	record, ok := s.sessions.Get(vpnPacket.SessionID)
+	if !ok {
+		return true
+	}
+
+	stream, exists := record.getStream(vpnPacket.StreamID)
+	if !exists || stream == nil {
+		return true
+	}
+
+	s.clearDeferredPacketsForStream(vpnPacket.SessionID, vpnPacket.StreamID)
+	stream.ARQ.MarkCloseWriteReceived()
 	return true
 }
 

@@ -180,6 +180,10 @@ func (c *Client) consumeInboundStreamAck(packetType uint8, packet VpnProto.Packe
 		return false
 	}
 
+	if packetType == Enums.PACKET_STREAM_RST_ACK {
+		c.rememberClosedStream(packet.StreamID, "ACK acknowledged", time.Now())
+	}
+
 	arqObj, ok := s.Stream.(*arq.ARQ)
 	if !ok {
 		return false
@@ -218,7 +222,16 @@ func (c *Client) shouldRememberClosedStream(reason string) bool {
 		return false
 	}
 
-	return reason == "FIN handshake completed" || strings.HasSuffix(reason, "acknowledged")
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return false
+	}
+
+	if reason == "close handshake completed" || reason == "client local disconnect completed" {
+		return true
+	}
+
+	return strings.HasSuffix(reason, "acknowledged")
 }
 
 func (c *Client) rememberClosedStream(streamID uint16, reason string, now time.Time) {
@@ -296,6 +309,10 @@ func (c *Client) handleMissingStreamPacket(packet VpnProto.Packet) bool {
 		return true
 	}
 
+	if packet.PacketType == Enums.PACKET_STREAM_RST_ACK {
+		c.rememberClosedStream(packet.StreamID, "ACK acknowledged", time.Now())
+	}
+
 	if _, ok := Enums.ReverseControlAckFor(packet.PacketType); ok {
 		return true
 	}
@@ -307,13 +324,34 @@ func (c *Client) handleMissingStreamPacket(packet VpnProto.Packet) bool {
 
 	// GetPacketCloseStream
 	ack_answer, ok := Enums.GetPacketCloseStream(packet.PacketType)
-	if ok && packet.PacketType != Enums.PACKET_STREAM_FIN {
+	if ok {
 		c.enqueueOrphanReset(ack_answer, packet.StreamID, 0)
 	} else {
 		c.enqueueOrphanReset(Enums.PACKET_STREAM_RST, packet.StreamID, 0)
 	}
 
 	return true
+}
+
+func (c *Client) ackRecentlyClosedStreamPacket(packet VpnProto.Packet) bool {
+	if c == nil || packet.StreamID == 0 {
+		return false
+	}
+
+	if packet.PacketType == Enums.PACKET_STREAM_DATA_ACK || packet.PacketType == Enums.PACKET_STREAM_DATA_NACK {
+		return true
+	}
+
+	if _, ok := Enums.ReverseControlAckFor(packet.PacketType); ok {
+		return true
+	}
+
+	if ackType, ok := Enums.ControlAckFor(packet.PacketType); ok {
+		c.enqueueOrphanReset(ackType, packet.StreamID, packet.SequenceNum)
+		return true
+	}
+
+	return false
 }
 
 func (c *Client) preprocessInboundPacket(packet VpnProto.Packet) bool {
@@ -324,6 +362,14 @@ func (c *Client) preprocessInboundPacket(packet VpnProto.Packet) bool {
 	exists_stream, stream_exists := c.getStream(packet.StreamID)
 	if packet.StreamID != 0 && (!stream_exists || exists_stream == nil) {
 		if c.isRecentlyClosedStream(packet.StreamID, c.now()) {
+			if packet.PacketType == Enums.PACKET_STREAM_DATA ||
+				packet.PacketType == Enums.PACKET_STREAM_RESEND {
+				c.enqueueOrphanReset(Enums.PACKET_STREAM_RST, packet.StreamID, 0)
+				return true
+			}
+			if c.ackRecentlyClosedStreamPacket(packet) {
+				return true
+			}
 			return true
 		}
 

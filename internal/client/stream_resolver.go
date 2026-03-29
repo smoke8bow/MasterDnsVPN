@@ -19,7 +19,8 @@ func (c *Client) runtimePacketDuplicationCount(packetType uint8) int {
 	if packetType == Enums.PACKET_STREAM_SYN ||
 		packetType == Enums.PACKET_PACKED_CONTROL_BLOCKS ||
 		packetType == Enums.PACKET_SOCKS5_SYN ||
-		packetType == Enums.PACKET_STREAM_FIN {
+		packetType == Enums.PACKET_STREAM_CLOSE_READ ||
+		packetType == Enums.PACKET_STREAM_CLOSE_WRITE {
 		if c.cfg.SetupPacketDuplicationCount > count {
 			count = c.cfg.SetupPacketDuplicationCount
 		}

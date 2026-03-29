@@ -416,15 +416,30 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 
 	arqObj, ok := s.Stream.(*arq.ARQ)
 	if !ok {
+		if (packet.PacketType == Enums.PACKET_STREAM_DATA ||
+			packet.PacketType == Enums.PACKET_STREAM_RESEND ||
+			packet.PacketType == Enums.PACKET_STREAM_DATA_NACK) && !c.isRecentlyClosedStream(packet.StreamID, c.now()) {
+			c.enqueueOrphanReset(Enums.PACKET_STREAM_RST, packet.StreamID, 0)
+		}
 		return nil
 	}
 
 	switch packet.PacketType {
 	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
-		if arqObj.IsClosed() || !s.TerminalSince().IsZero() {
+		if arqObj.IsClosed() {
+			c.enqueueOrphanReset(Enums.PACKET_STREAM_RST, packet.StreamID, 0)
 			return nil
 		}
-		arqObj.ReceiveData(packet.SequenceNum, packet.Payload)
+
+		if !s.TerminalSince().IsZero() {
+			c.enqueueOrphanReset(Enums.PACKET_STREAM_RST, packet.StreamID, 0)
+			return nil
+		}
+
+		if !arqObj.ReceiveData(packet.SequenceNum, packet.Payload) {
+			return nil
+		}
+
 	case Enums.PACKET_STREAM_DATA_NACK:
 		if arqObj.IsClosed() || !s.TerminalSince().IsZero() {
 			return nil
@@ -437,8 +452,10 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 		return c.handleStreamConnected(packet, s, arqObj)
 	case Enums.PACKET_STREAM_CONNECT_FAIL:
 		return c.handleStreamConnectFail(packet, s, arqObj)
-	case Enums.PACKET_STREAM_FIN:
-		arqObj.MarkFinReceived()
+	case Enums.PACKET_STREAM_CLOSE_READ:
+		arqObj.MarkCloseReadReceived()
+	case Enums.PACKET_STREAM_CLOSE_WRITE:
+		arqObj.MarkCloseWriteReceived()
 	case Enums.PACKET_STREAM_RST:
 		arqObj.MarkRstReceived()
 		arqObj.Close("peer reset received", arq.CloseOptions{Force: true})

@@ -131,6 +131,51 @@ func TestCleanupClosedSessionClosesStreamsAndClearsQueues(t *testing.T) {
 	}
 }
 
+func TestForceCloseStreamQueuesRSTOnServer(t *testing.T) {
+	record := newTestSessionRecord(21)
+	stream := record.getOrCreateStream(1, arq.Config{}, nil, nil)
+	upstream := &testReadWriteCloser{}
+	stream.UpstreamConn = upstream
+	stream.Connected = true
+
+	stream.CloseStream(true, 0, "force close")
+
+	if !upstream.closed {
+		t.Fatal("expected force close to close upstream connection")
+	}
+
+	pkt, _, ok := stream.TXQueue.Pop(func(p *serverStreamTXPacket) uint64 {
+		return Enums.PacketIdentityKey(stream.ID, p.PacketType, p.SequenceNum, p.FragmentID)
+	})
+	if !ok || pkt == nil {
+		t.Fatal("expected queued STREAM_RST after force close")
+	}
+	defer putTXPacketToPool(pkt)
+
+	if pkt.PacketType != Enums.PACKET_STREAM_RST {
+		t.Fatalf("expected packet type %s, got %s", Enums.PacketTypeName(Enums.PACKET_STREAM_RST), Enums.PacketTypeName(pkt.PacketType))
+	}
+}
+
+func TestGracefulCloseStreamQueuesCloseReadOnServer(t *testing.T) {
+	record := newTestSessionRecord(22)
+	stream := record.getOrCreateStream(1, arq.Config{}, nil, nil)
+
+	stream.CloseStream(false, 0, "graceful close")
+
+	pkt, _, ok := stream.TXQueue.Pop(func(p *serverStreamTXPacket) uint64 {
+		return Enums.PacketIdentityKey(stream.ID, p.PacketType, p.SequenceNum, p.FragmentID)
+	})
+	if !ok || pkt == nil {
+		t.Fatal("expected queued STREAM_CLOSE_READ after graceful close")
+	}
+	defer putTXPacketToPool(pkt)
+
+	if pkt.PacketType != Enums.PACKET_STREAM_CLOSE_READ {
+		t.Fatalf("expected packet type %s, got %s", Enums.PacketTypeName(Enums.PACKET_STREAM_CLOSE_READ), Enums.PacketTypeName(pkt.PacketType))
+	}
+}
+
 func TestSessionStoreCleanupReturnsExpiredRecordForFollowupCleanup(t *testing.T) {
 	store := newSessionStore(8, 32)
 	record := newTestSessionRecord(9)
@@ -195,7 +240,7 @@ func TestCleanupTerminalStreamsAbortsAndRemovesExpiredStreams(t *testing.T) {
 	upstream := &testReadWriteCloser{}
 	stream := record.getOrCreateStream(2, arq.Config{}, nil, nil)
 	stream.UpstreamConn = upstream
-	if !stream.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_FIN), Enums.PACKET_STREAM_FIN, 21, 0, 0, 0, 0, nil) {
+	if !stream.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_CLOSE_READ), Enums.PACKET_STREAM_CLOSE_READ, 21, 0, 0, 0, 0, nil) {
 		t.Fatalf("expected TX packet to be queued")
 	}
 
@@ -227,7 +272,7 @@ func TestDequeueSessionResponseDuplicatesLastPackedControlBlock(t *testing.T) {
 	if !stream.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_SYN_ACK), Enums.PACKET_STREAM_SYN_ACK, 11, 0, 0, 0, 0, nil) {
 		t.Fatalf("expected first control packet to queue")
 	}
-	if !stream.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_FIN_ACK), Enums.PACKET_STREAM_FIN_ACK, 12, 0, 0, 0, 0, nil) {
+	if !stream.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_CLOSE_READ_ACK), Enums.PACKET_STREAM_CLOSE_READ_ACK, 12, 0, 0, 0, 0, nil) {
 		t.Fatalf("expected second control packet to queue")
 	}
 
@@ -360,12 +405,12 @@ func TestRecentlyClosedGracefulStreamSuppressesMissingStreamReset(t *testing.T) 
 		t.Fatal("expected stream to be created")
 	}
 
-	stream.OnARQClosed("FIN handshake completed")
+	stream.OnARQClosed("close handshake completed")
 
 	packet := VpnProto.Packet{
 		SessionID:     record.ID,
 		SessionCookie: record.Cookie,
-		PacketType:    Enums.PACKET_STREAM_FIN,
+		PacketType:    Enums.PACKET_STREAM_CLOSE_READ,
 		StreamID:      12,
 		HasStreamID:   true,
 	}
@@ -373,8 +418,89 @@ func TestRecentlyClosedGracefulStreamSuppressesMissingStreamReset(t *testing.T) 
 	if !s.preprocessInboundPacket(packet) {
 		t.Fatal("expected recently closed graceful stream packet to be consumed")
 	}
-	if size := record.OrphanQueue.Size(); size != 0 {
-		t.Fatalf("expected no orphan reset for gracefully closed stream, got %d", size)
+	popped, _, ok := record.OrphanQueue.Pop(func(packet VpnProto.Packet) uint64 {
+		return orphanResetKey(packet.PacketType, packet.StreamID)
+	})
+	if !ok {
+		t.Fatal("expected CLOSE_READ_ACK queued for gracefully closed stream")
+	}
+	if popped.PacketType != Enums.PACKET_STREAM_CLOSE_READ_ACK {
+		t.Fatalf("expected packet type %s, got %s", Enums.PacketTypeName(Enums.PACKET_STREAM_CLOSE_READ_ACK), Enums.PacketTypeName(popped.PacketType))
+	}
+}
+
+func TestRecentlyClosedGracefulStreamStillAcksLateCloseWrite(t *testing.T) {
+	s := newTestServerForStreamSyn("TCP")
+	record := newTestSessionRecord(24)
+	record.Cookie = 9
+	s.sessions.byID[record.ID] = record
+
+	stream := record.getOrCreateStream(15, arq.Config{}, nil, nil)
+	if stream == nil {
+		t.Fatal("expected stream to be created")
+	}
+
+	stream.OnARQClosed("close handshake completed")
+
+	packet := VpnProto.Packet{
+		SessionID:     record.ID,
+		SessionCookie: record.Cookie,
+		PacketType:    Enums.PACKET_STREAM_CLOSE_WRITE,
+		StreamID:      15,
+		HasStreamID:   true,
+	}
+
+	if !s.preprocessInboundPacket(packet) {
+		t.Fatal("expected recently closed stream CLOSE_WRITE to be consumed")
+	}
+
+	popped, _, ok := record.OrphanQueue.Pop(func(packet VpnProto.Packet) uint64 {
+		return orphanResetKey(packet.PacketType, packet.StreamID)
+	})
+	if !ok {
+		t.Fatal("expected CLOSE_WRITE_ACK queued for recently closed stream")
+	}
+	if popped.PacketType != Enums.PACKET_STREAM_CLOSE_WRITE_ACK {
+		t.Fatalf("expected packet type %s, got %s", Enums.PacketTypeName(Enums.PACKET_STREAM_CLOSE_WRITE_ACK), Enums.PacketTypeName(popped.PacketType))
+	}
+}
+
+func TestRecentlyClosedGracefulStreamLateDataQueuesRST(t *testing.T) {
+	s := newTestServerForStreamSyn("TCP")
+	record := newTestSessionRecord(25)
+	record.Cookie = 9
+	s.sessions.byID[record.ID] = record
+
+	stream := record.getOrCreateStream(16, arq.Config{}, nil, nil)
+	if stream == nil {
+		t.Fatal("expected stream to be created")
+	}
+
+	stream.OnARQClosed("close handshake completed")
+
+	packet := VpnProto.Packet{
+		SessionID:      record.ID,
+		SessionCookie:  record.Cookie,
+		PacketType:     Enums.PACKET_STREAM_DATA,
+		StreamID:       16,
+		HasStreamID:    true,
+		SequenceNum:    1,
+		HasSequenceNum: true,
+		Payload:        []byte("late"),
+	}
+
+	if !s.preprocessInboundPacket(packet) {
+		t.Fatal("expected recently closed stream DATA to be consumed")
+	}
+
+	popped, _, ok := record.OrphanQueue.Pop(func(packet VpnProto.Packet) uint64 {
+		return orphanResetKey(packet.PacketType, packet.StreamID)
+	})
+	if !ok {
+		t.Fatal("expected STREAM_RST queued for late data on recently closed stream")
+	}
+	if popped.PacketType != Enums.PACKET_STREAM_RST {
+		t.Fatalf("expected packet type %s, got %s", Enums.PacketTypeName(Enums.PACKET_STREAM_RST), Enums.PacketTypeName(popped.PacketType))
 	}
 }
 
@@ -388,7 +514,7 @@ func TestRecentlyClosedNonSuppressedStreamStillQueuesMissingStreamReset(t *testi
 	packet := VpnProto.Packet{
 		SessionID:     record.ID,
 		SessionCookie: record.Cookie,
-		PacketType:    Enums.PACKET_STREAM_FIN,
+		PacketType:    Enums.PACKET_STREAM_CLOSE_READ,
 		StreamID:      14,
 		HasStreamID:   true,
 	}
@@ -495,7 +621,7 @@ func TestOnStreamClosedCleansDeferredAndSOCKSArtifacts(t *testing.T) {
 		t.Fatal("unexpected completed SOCKS5 fragment state")
 	}
 
-	stream.OnARQClosed("FIN handshake completed")
+	stream.OnARQClosed("close handshake completed")
 
 	if _, exists := s.deferredInflight[deferredTrackedPacketKey(packet)]; exists {
 		t.Fatal("expected stream close to clear deferred inflight state")

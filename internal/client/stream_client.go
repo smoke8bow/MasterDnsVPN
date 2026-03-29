@@ -151,6 +151,7 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 		TerminalDrainTimeout:     c.cfg.ARQTerminalDrainTimeoutSec,
 		TerminalAckWaitTimeout:   c.cfg.ARQTerminalAckWaitTimeoutSec,
 		CompressionType:          c.uploadCompression,
+		IsClient:                 true,
 	}
 
 	a := arq.NewARQ(streamID, c.sessionID, s, conn, mtu, c.log, arqCfg)
@@ -364,14 +365,24 @@ func (s *Stream_client) CloseStream(force bool, ttl time.Duration) {
 	}
 
 	if a, ok := s.Stream.(*arq.ARQ); ok && a != nil {
-		a.Close("Close stream requested", arq.CloseOptions{
-			Force:   force,
-			SendRST: !force,
-			TTL:     ttl,
-		})
 		if force {
-			s.finalizeAfterARQClose()
+			s.MarkTerminal(time.Now())
+			s.SetStatus(streamStatusCancelled)
+			if s.NetConn != nil {
+				_ = s.NetConn.Close()
+			}
+			a.Close("Close stream requested", arq.CloseOptions{
+				SendRST: true,
+				TTL:     ttl,
+			})
+			return
 		}
+
+		a.Close("Close stream requested", arq.CloseOptions{
+			SendCloseRead: true,
+			AfterDrain:    true,
+			TTL:           ttl,
+		})
 		return
 	}
 
@@ -570,7 +581,8 @@ func (c *Client) InitVirtualStream0() {
 	c.log.Debugf("🚀 <green>Virtual Stream 0 (Control Channel) Initialized.</green>")
 }
 
-// CloseAllStreams completely flushes all ARQ bindings. For Stream 0, it calls ForceClose.
+// CloseAllStreams is the hard-stop path used during runtime shutdown/reset.
+// It finalizes streams locally so retransmit loops stop immediately.
 func (c *Client) CloseAllStreams() {
 	c.streamsMu.Lock()
 	streams := make([]*Stream_client, 0, len(c.active_streams))

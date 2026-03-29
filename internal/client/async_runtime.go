@@ -40,6 +40,7 @@ type asyncReadPacket struct {
 func (c *Client) StopAsyncRuntime() {
 	if c.asyncCancel != nil {
 		c.log.Debugf("\U0001F6D1 <yellow>Stopping Async Runtime...</yellow>")
+		c.CloseAllStreams()
 		c.asyncCancel()
 		c.asyncWG.Wait()
 		c.asyncCancel = nil
@@ -500,6 +501,9 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 		return
 	}
 
+	// if vpnPacket.PacketType != Enums.PACKET_PONG {
+	// 	c.log.Warnf("<green>Receiving Packet, Packet: %s | Session %d | Payload Len(%d) | Stream: %d | Seq: %d | Fg: %d | TF: %d</green>", Enums.PacketTypeName(vpnPacket.PacketType), vpnPacket.SessionID, len(vpnPacket.Payload), vpnPacket.StreamID, vpnPacket.SequenceNum, vpnPacket.FragmentID, vpnPacket.TotalFragments)
+	// }
 	c.trackResolverSuccess(data, addr, time.Now())
 
 	// 2. Notify activity monitor (PingManager)
