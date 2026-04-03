@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -215,7 +214,6 @@ type ARQ struct {
 	cancel         context.CancelFunc
 	wg             sync.WaitGroup
 	flushSignal    chan struct{}
-	retransmitWake chan struct{}
 	rxChan         chan rxPayload
 	pendingInbound int
 }
@@ -270,21 +268,6 @@ func classifyIOError(err error) ioErrorClass {
 		return ioErrorTransient
 	}
 	return ioErrorFatal
-}
-
-func isAbortLikeLocalConnError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
-		return true
-	}
-
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "an established connection was aborted by the software in your host machine") ||
-		strings.Contains(msg, "connection reset by peer") ||
-		strings.Contains(msg, "forcibly closed by the remote host") ||
-		strings.Contains(msg, "broken pipe")
 }
 
 // Config represents the extensive ARQ tuning configuration identically ported from Python
@@ -366,12 +349,11 @@ func NewARQ(streamID uint16, sessionID uint8, enqueuer PacketEnqueuer, localConn
 		state:        StateOpen,
 		lastActivity: time.Now(),
 
-		windowSize:     windowSize,
-		limit:          limit,
-		windowNotFull:  make(chan struct{}, 1),
-		writeLock:      sync.Mutex{},
-		flushSignal:    make(chan struct{}, 1),
-		retransmitWake: make(chan struct{}, 1),
+		windowSize:    windowSize,
+		limit:         limit,
+		windowNotFull: make(chan struct{}, 1),
+		writeLock:     sync.Mutex{},
+		flushSignal:   make(chan struct{}, 1),
 
 		inactivityTimeout:    time.Duration(maxF(120.0, cfg.InactivityTimeout) * float64(time.Second)),
 		dataPacketTTL:        time.Duration(maxF(120.0, cfg.DataPacketTTL) * float64(time.Second)),
@@ -569,16 +551,8 @@ func (a *ARQ) signalWindowNotFull() {
 }
 
 func (a *ARQ) waitWindowNotFull() {
-	// Fast path: no allocation needed when window has room (the common case).
-	a.mu.RLock()
-	needWait := len(a.sndBuf) >= a.limit && !a.closed
-	a.mu.RUnlock()
-	if !needWait {
-		return
-	}
-
-	// Slow path: window is full — only now allocate a timer.
 	timer := time.NewTimer(50 * time.Millisecond)
+	waitStarted := time.Time{}
 	defer func() {
 		if !timer.Stop() {
 			select {
@@ -589,18 +563,19 @@ func (a *ARQ) waitWindowNotFull() {
 	}()
 
 	for {
-		select {
-		case <-a.windowNotFull:
-		case <-timer.C:
-		case <-a.ctx.Done():
-			return
-		}
 		a.mu.RLock()
 		sndBufLen := len(a.sndBuf)
-		a.mu.RUnlock()
 		if sndBufLen < a.limit || a.closed {
+			a.mu.RUnlock()
 			return
 		}
+		a.mu.RUnlock()
+
+		now := time.Now()
+		if waitStarted.IsZero() {
+			waitStarted = now
+		}
+
 		if !timer.Stop() {
 			select {
 			case <-timer.C:
@@ -608,19 +583,19 @@ func (a *ARQ) waitWindowNotFull() {
 			}
 		}
 		timer.Reset(50 * time.Millisecond)
+
+		select {
+		case <-a.windowNotFull:
+		case <-timer.C:
+		case <-a.ctx.Done():
+			return
+		}
 	}
 }
 
 func (a *ARQ) signalFlushReady() {
 	select {
 	case a.flushSignal <- struct{}{}:
-	default:
-	}
-}
-
-func (a *ARQ) signalRetransmitWake() {
-	select {
-	case a.retransmitWake <- struct{}{}:
 	default:
 	}
 }
@@ -839,7 +814,6 @@ func (a *ARQ) tryFinalizeClientLocalDisconnect() {
 		a.closeReadAcked &&
 		len(a.sndBuf) == 0 &&
 		len(a.rcvBuf) == 0 &&
-		a.pendingInbound == 0 &&
 		!a.localWritePending &&
 		!a.waitingAck &&
 		!a.deferredClose
@@ -970,7 +944,7 @@ func (a *ARQ) ioLoop() {
 
 	buf := make([]byte, max(a.mtu, 1))
 
-	for a.ctx.Err() == nil {
+	for !a.isClosed() {
 		a.waitWindowNotFull()
 
 		a.mu.Lock()
@@ -1013,7 +987,6 @@ func (a *ARQ) ioLoop() {
 			sn := a.sndNxt
 			a.sndNxt++
 			currentRTO := a.currentDataBaseRTO()
-			wasEmpty := len(a.sndBuf) == 0
 			a.sndBuf[sn] = &arqDataItem{
 				Data:            raw,
 				CreatedAt:       now,
@@ -1026,9 +999,6 @@ func (a *ARQ) ioLoop() {
 				TTL:             0,
 			}
 			a.mu.Unlock()
-			if wasEmpty {
-				a.signalRetransmitWake()
-			}
 
 			ok := a.enqueuer.PushTXPacket(
 				Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA),
@@ -1073,17 +1043,11 @@ func (a *ARQ) ioLoop() {
 					alreadyHandled = true
 					break
 				}
-				errorReason = "Local App Closed Connection"
-				a.noteClientEOF(time.Now())
-				gracefulEOF = true
+				errorReason = "Local connection closed"
+				resetRequired = true
+				resetAfterDrain = n > 0
 			default:
 				transientReadSince = time.Time{}
-				if isAbortLikeLocalConnError(err) {
-					errorReason = "Local App Closed Connection (aborted): " + err.Error()
-					a.noteClientEOF(time.Now())
-					gracefulEOF = true
-					break
-				}
 				errorReason = "Read Error: " + err.Error()
 				resetRequired = true
 				resetAfterDrain = n > 0
@@ -1293,22 +1257,14 @@ func (a *ARQ) retransmitLoop() {
 			rtoFactor = a.controlRto
 		}
 
-		// Poll at rto/4 so retransmits fire within ~25% of their deadline;
-		// floor at 25ms to stay responsive for sub-100ms RTT configs.
-		baseInterval := max(rtoFactor/4, 25*time.Millisecond)
+		baseInterval := max(rtoFactor/3, 50*time.Millisecond)
 
-		hasPending := len(a.sndBuf) > 0 ||
-			(a.enableControlReliability && len(a.controlSndBuf) > 0) ||
-			a.waitingAck || a.deferredClose
+		hasPending := len(a.sndBuf) > 0 || (a.enableControlReliability && len(a.controlSndBuf) > 0)
 		a.mu.Unlock()
 
-		var interval time.Duration
+		interval := baseInterval
 		if !hasPending {
-			// Nothing to retransmit: sleep longer and rely on retransmitWake
-			// to fire the moment new data enters an empty sndBuf.
-			interval = max(baseInterval*8, 200*time.Millisecond)
-		} else {
-			interval = baseInterval
+			interval = max(baseInterval*4, 100*time.Millisecond)
 		}
 
 		if !timer.Stop() {
@@ -1322,7 +1278,6 @@ func (a *ARQ) retransmitLoop() {
 		case <-a.ctx.Done():
 			return
 		case <-timer.C:
-		case <-a.retransmitWake:
 		}
 
 		func() {
@@ -1453,7 +1408,6 @@ func (a *ARQ) processReceivedDataBatch(batch []rxPayload) {
 		isNew   bool // newly inserted (not duplicate)
 		oldWrap bool // old/wrapped sn — ACK but don't insert
 	}
-
 	results := make([]rxResult, len(batch))
 
 	for i, pkt := range batch {
@@ -1939,11 +1893,10 @@ func (a *ARQ) SendControlPacketWithTTL(packetType uint8, sequenceNum uint16, fra
 
 	key := uint32(packetType)<<24 | uint32(sequenceNum)<<8 | uint32(fragmentID)
 	now := time.Now()
-	shouldWake := false
 
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	if _, exists := a.controlSndBuf[key]; exists {
-		a.mu.Unlock()
 		return true
 	}
 
@@ -1979,12 +1932,6 @@ func (a *ARQ) SendControlPacketWithTTL(packetType uint8, sequenceNum uint16, fra
 		CurrentRTO:     initialRTO,
 		SampleEligible: true,
 		TTL:            ttl,
-	}
-	shouldWake = true
-	a.mu.Unlock()
-
-	if shouldWake {
-		a.signalRetransmitWake()
 	}
 
 	return ok
@@ -2470,25 +2417,13 @@ func (a *ARQ) finalizeClose(reason string) {
 
 	sndBufLen := len(a.sndBuf)
 	rcvBufLen := len(a.rcvBuf)
-	pendingInbound := a.pendingInbound
 	prevState := a.state
 	closeReadSent := a.closeReadSent
 	closeReadReceived := a.closeReadReceived
 	closeReadAcked := a.closeReadAcked
-	closeWriteSent := a.closeWriteSent
-	closeWriteReceived := a.closeWriteReceived
-	closeWriteAcked := a.closeWriteAcked
 	rstSent := a.rstSent
 	rstReceived := a.rstReceived
 	rstAcked := a.rstAcked
-	priorReason := a.closeReason
-	localWritePending := a.localWritePending
-	localWriteClosed := a.localWriteClosed
-	localWriterBroken := a.localWriterBroken
-	waitingAck := a.waitingAck
-	waitingAckFor := a.waitingAckFor
-	deferredClose := a.deferredClose
-	deferredPacket := a.deferredPacket
 	a.closeReason = reason
 	a.closed = true
 	a.deferredClose = false
@@ -2517,28 +2452,16 @@ func (a *ARQ) finalizeClose(reason string) {
 	a.mu.Unlock()
 
 	a.logger.Debugf(
-		"ARQ Stream Closed | Session: %d | Stream: %d | Reason: %s | PriorReason: %s | PrevState: %d | SndBuf: %d | RcvBuf: %d | PendingInbound: %d | LocalWrite: pending=%t closed=%t broken=%t | CloseRead: %t/%t/%t | CloseWrite: %t/%t/%t | WaitingAck: %t/%s | Deferred: %t/%s | RST: %t/%t/%t",
+		"ARQ Stream Closed | Session: %d | Stream: %d | Reason: %s | PrevState: %d | SndBuf: %d | RcvBuf: %d | CloseRead: %t/%t/%t | RST: %t/%t/%t",
 		a.sessionID,
 		a.streamID,
 		reason,
-		priorReason,
 		prevState,
 		sndBufLen,
 		rcvBufLen,
-		pendingInbound,
-		localWritePending,
-		localWriteClosed,
-		localWriterBroken,
 		closeReadSent,
 		closeReadReceived,
 		closeReadAcked,
-		closeWriteSent,
-		closeWriteReceived,
-		closeWriteAcked,
-		waitingAck,
-		Enums.PacketTypeName(waitingAckFor),
-		deferredClose,
-		Enums.PacketTypeName(deferredPacket),
 		rstSent,
 		rstReceived,
 		rstAcked,
