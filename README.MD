@@ -668,6 +668,19 @@ These settings are critical on the server:
 | :--- | :--- | :--- | :--- |
 | `LOG_LEVEL` | `"INFO"` | usually `DEBUG`, `INFO`, `WARN`, `ERROR` | Server log level.<br>For normal production usage, `INFO` is usually enough.<br>For deep investigation of sessions, deferred workers, or ARQ behavior, temporarily use `DEBUG`. |
 
+### 3.5.10) Session Policy Sync
+
+During `SESSION_INIT`, the server may append a compact policy block to `SESSION_ACCEPT`.
+The client applies these limits immediately before normal runtime starts.
+
+- Server-enforced `max` values reduce the client only when the requested value is higher.
+- Server-enforced `min` values raise the client only when the requested value is lower.
+- MTU limits are enforced on both sides:
+  - The server clamps the accepted session MTU during init.
+  - The client also clamps its local runtime settings after decode.
+- Runtime-derived state such as worker counts, queues, fragment stores, and packed-block sizing is rebuilt from the effective synced values.
+- Legacy servers that still send the old 7-byte `SESSION_ACCEPT` payload remain compatible; policy sync is simply skipped.
+
 ---
 
 ## Section 3.6: 🧪 Testing, Finding, and Scanning Resolvers
