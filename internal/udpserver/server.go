@@ -114,12 +114,15 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		socksConnectTimeout = 8 * time.Second
 	}
 	dnsDeferredWorkers, connectDeferredWorkers, dnsDeferredQueue, connectDeferredQueue := splitDeferredSessionPools(cfg.EffectiveDeferredSessionWorkers(), cfg.EffectiveDeferredSessionQueueLimit())
+	sessions := newSessionStore(cfg.EffectiveSessionOrphanQueueInitialCap(), cfg.EffectiveStreamQueueInitialCapacity(), cfg.SessionInitReuseTTL(), cfg.RecentlyClosedStreamTTL(), cfg.RecentlyClosedStreamCap)
+	sessions.maxActiveSessions = cfg.MaxAllowedClientActiveSessions
+	sessions.maxActiveStreams = cfg.MaxAllowedClientActiveStreams
 	return &Server{
 		cfg:                    cfg,
 		log:                    log,
 		codec:                  codec,
 		domainMatcher:          domainMatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
-		sessions:               newSessionStore(cfg.EffectiveSessionOrphanQueueInitialCap(), cfg.EffectiveStreamQueueInitialCapacity(), cfg.SessionInitReuseTTL(), cfg.RecentlyClosedStreamTTL(), cfg.RecentlyClosedStreamCap),
+		sessions:               sessions,
 		deferredDNSSession:     newDeferredSessionProcessor(dnsDeferredWorkers, dnsDeferredQueue, log),
 		deferredConnectSession: newDeferredSessionProcessor(connectDeferredWorkers, connectDeferredQueue, log),
 		invalidCookieTracker:   newInvalidCookieTracker(),

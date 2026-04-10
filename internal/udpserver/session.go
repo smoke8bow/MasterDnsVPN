@@ -72,6 +72,7 @@ type sessionRecord struct {
 	OrphanQueue                     *mlq.MultiLevelQueue[VpnProto.Packet]
 	LastPackedControlBlock          *VpnProto.Packet
 	LastPackedControlBlockRemaining int
+	MaxActiveStreamsPerSession      int
 	closedFlag                      uint32
 	streamCleanup                   func(uint8, uint16)
 }
@@ -177,6 +178,8 @@ type sessionStore struct {
 	recentClosed           map[uint8]closedSessionRecord
 	orphanQueueCap         int
 	streamQueueCap         int
+	maxActiveSessions      int
+	maxActiveStreams       int
 	sessionInitTTL         time.Duration
 	recentlyClosedTTL      time.Duration
 	recentlyClosedCap      int
@@ -215,6 +218,8 @@ func newSessionStore(orphanQueueCap int, streamQueueCap int, options ...any) *se
 		nextID:            1,
 		orphanQueueCap:    orphanQueueCap,
 		streamQueueCap:    streamQueueCap,
+		maxActiveSessions: maxServerSessionSlots,
+		maxActiveStreams:  1000,
 		sessionInitTTL:    sessionInitTTL,
 		recentlyClosedTTL: recentlyClosedTTL,
 		recentlyClosedCap: recentlyClosedCap,
@@ -259,18 +264,19 @@ func (s *sessionStore) findOrCreate(
 	}
 
 	record := &sessionRecord{
-		ID:                uint8(slot),
-		ResponseMode:      payload[0],
-		CreatedAt:         now,
-		ReuseUntil:        now.Add(s.sessionInitTTL),
-		Signature:         signature,
-		Streams:           make(map[uint16]*Stream_server),
-		ActiveStreams:     make([]uint16, 0, 8),
-		StreamQueueCap:    s.streamQueueCap,
-		RecentlyClosed:    make(map[uint16]recentlyClosedStreamRecord, 8),
-		RecentlyClosedTTL: s.recentlyClosedTTL,
-		RecentlyClosedCap: s.recentlyClosedCap,
-		OrphanQueue:       mlq.New[VpnProto.Packet](s.orphanQueueCap),
+		ID:                         uint8(slot),
+		ResponseMode:               payload[0],
+		CreatedAt:                  now,
+		ReuseUntil:                 now.Add(s.sessionInitTTL),
+		Signature:                  signature,
+		Streams:                    make(map[uint16]*Stream_server),
+		ActiveStreams:              make([]uint16, 0, 8),
+		StreamQueueCap:             s.streamQueueCap,
+		MaxActiveStreamsPerSession: s.maxActiveStreams,
+		RecentlyClosed:             make(map[uint16]recentlyClosedStreamRecord, 8),
+		RecentlyClosedTTL:          s.recentlyClosedTTL,
+		RecentlyClosedCap:          s.recentlyClosedCap,
+		OrphanQueue:                mlq.New[VpnProto.Packet](s.orphanQueueCap),
 	}
 
 	// Initialize virtual Stream 0 for control packets
@@ -515,7 +521,12 @@ func (s *sessionStore) SweepRecentlyClosedStreams(now time.Time) {
 }
 
 func (s *sessionStore) allocateSlotLocked() int {
-	if s.activeCount >= maxServerSessionSlots {
+	maxActiveSessions := s.maxActiveSessions
+	if maxActiveSessions <= 0 || maxActiveSessions > maxServerSessionSlots {
+		maxActiveSessions = maxServerSessionSlots
+	}
+
+	if s.activeCount >= uint16(maxActiveSessions) {
 		return -1
 	}
 
@@ -718,6 +729,7 @@ func (r *sessionRecord) getOrCreateStream(streamID uint16, arqConfig arq.Config,
 	if r == nil || r.isClosed() {
 		return nil
 	}
+
 	r.StreamsMu.Lock()
 	defer r.StreamsMu.Unlock()
 	if r.isClosed() {
@@ -726,6 +738,10 @@ func (r *sessionRecord) getOrCreateStream(streamID uint16, arqConfig arq.Config,
 
 	if s, ok := r.Streams[streamID]; ok {
 		return s
+	}
+
+	if !r.canCreateAdditionalStreamLocked(streamID) {
+		return nil
 	}
 
 	delete(r.RecentlyClosed, streamID)
@@ -756,6 +772,37 @@ func (r *sessionRecord) getOrCreateStream(streamID uint16, arqConfig arq.Config,
 	}
 
 	return s
+}
+
+func (r *sessionRecord) canCreateAdditionalStream(streamID uint16) bool {
+	if r == nil || r.isClosed() {
+		return false
+	}
+
+	r.StreamsMu.RLock()
+	defer r.StreamsMu.RUnlock()
+	return r.canCreateAdditionalStreamLocked(streamID)
+}
+
+func (r *sessionRecord) canCreateAdditionalStreamLocked(streamID uint16) bool {
+	if streamID == 0 {
+		return true
+	}
+	if _, exists := r.Streams[streamID]; exists {
+		return true
+	}
+
+	limit := r.MaxActiveStreamsPerSession
+	if limit <= 0 {
+		limit = 2000
+	}
+
+	activeStreams := len(r.Streams)
+	if _, exists := r.Streams[0]; exists {
+		activeStreams--
+	}
+
+	return activeStreams < limit
 }
 
 func shouldSuppressServerOrphanForCloseReason(reason string) bool {

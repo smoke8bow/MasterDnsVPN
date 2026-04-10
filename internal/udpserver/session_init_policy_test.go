@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"masterdnsvpn-go/internal/arq"
 	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
@@ -32,6 +33,32 @@ func TestSessionInitPolicyMTULimitsAreAppliedToServerSession(t *testing.T) {
 	}
 	if record.DownloadMTU != 2048 {
 		t.Fatalf("unexpected download mtu clamp: got=%d want=%d", record.DownloadMTU, 2048)
+	}
+}
+
+func TestSessionStoreHonorsConfiguredActiveSessionLimit(t *testing.T) {
+	store := newSessionStore(16, 32)
+	store.maxActiveSessions = 1
+
+	payloadA := make([]byte, sessionInitDataSize)
+	payloadA[0] = mtuProbeModeRaw
+	copy(payloadA[6:10], []byte{1, 2, 3, 4})
+
+	record, reused, err := store.findOrCreate(payloadA, 0, 0, 10, 150, 2048)
+	if err != nil {
+		t.Fatalf("first findOrCreate returned error: %v", err)
+	}
+	if reused || record == nil {
+		t.Fatal("expected first session to be created")
+	}
+
+	payloadB := make([]byte, sessionInitDataSize)
+	payloadB[0] = mtuProbeModeRaw
+	copy(payloadB[6:10], []byte{5, 6, 7, 8})
+
+	record, reused, err = store.findOrCreate(payloadB, 0, 0, 10, 150, 2048)
+	if err != ErrSessionTableFull {
+		t.Fatalf("expected ErrSessionTableFull, got record=%v reused=%v err=%v", record != nil, reused, err)
 	}
 }
 
@@ -129,5 +156,56 @@ func TestHandleSessionInitRequestIncludesServerClientPolicy(t *testing.T) {
 	}
 	if accept.ClientPolicy.MinARQInitialRTOSeconds < 0.245 || accept.ClientPolicy.MinARQInitialRTOSeconds > 0.255 {
 		t.Fatalf("unexpected min arq initial rto: got=%f", accept.ClientPolicy.MinARQInitialRTOSeconds)
+	}
+}
+
+func TestHandleStreamSynRequestRejectsWhenActiveStreamLimitIsReached(t *testing.T) {
+	store := newSessionStore(16, 32)
+	store.maxActiveStreams = 1
+
+	payload := make([]byte, sessionInitDataSize)
+	payload[0] = mtuProbeModeRaw
+	copy(payload[6:10], []byte{1, 2, 3, 4})
+
+	record, reused, err := store.findOrCreate(payload, 0, 0, 10, 150, 2048)
+	if err != nil {
+		t.Fatalf("findOrCreate returned error: %v", err)
+	}
+	if reused || record == nil {
+		t.Fatal("expected a fresh session record")
+	}
+
+	stream := record.getOrCreateStream(1, arq.Config{}, nil, nil)
+	if stream == nil {
+		t.Fatal("expected first user stream to be created")
+	}
+
+	s := &Server{sessions: store}
+	packet := VpnProto.Packet{
+		SessionID:      record.ID,
+		SessionCookie:  record.Cookie,
+		PacketType:     Enums.PACKET_STREAM_SYN,
+		StreamID:       2,
+		HasStreamID:    true,
+		SequenceNum:    77,
+		HasSequenceNum: true,
+	}
+
+	if !s.handleStreamSynRequest(packet, &sessionRuntimeView{ID: record.ID}) {
+		t.Fatal("expected stream syn over limit to be handled")
+	}
+	if _, exists := record.getStream(2); exists {
+		t.Fatal("did not expect a new stream to be created when limit is reached")
+	}
+
+	orphan, _, ok := record.OrphanQueue.Pop()
+	if !ok {
+		t.Fatal("expected rejection packet in orphan queue")
+	}
+	if orphan.PacketType != Enums.PACKET_STREAM_CONNECT_FAIL {
+		t.Fatalf("unexpected rejection packet type: got=%d want=%d", orphan.PacketType, Enums.PACKET_STREAM_CONNECT_FAIL)
+	}
+	if orphan.StreamID != 2 || orphan.SequenceNum != 77 {
+		t.Fatalf("unexpected rejection packet identity: stream=%d seq=%d", orphan.StreamID, orphan.SequenceNum)
 	}
 }

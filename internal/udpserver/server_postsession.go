@@ -131,6 +131,34 @@ func isStreamCreationPacketType(packetType uint8) bool {
 	}
 }
 
+func (s *Server) rejectNewStreamBecauseLimit(record *sessionRecord, vpnPacket VpnProto.Packet) bool {
+	if s == nil || record == nil || vpnPacket.StreamID == 0 {
+		return false
+	}
+
+	packetType := uint8(Enums.PACKET_STREAM_CONNECT_FAIL)
+	reason := "stream"
+	if vpnPacket.PacketType == Enums.PACKET_SOCKS5_SYN {
+		packetType = Enums.PACKET_SOCKS5_CONNECT_FAIL
+		reason = "socks5 stream"
+	}
+
+	record.enqueueOrphanReset(packetType, vpnPacket.StreamID, vpnPacket.SequenceNum)
+	_ = s.queueImmediateControlAck(record, vpnPacket)
+
+	if s.log != nil {
+		s.log.Warnf(
+			"<yellow>Rejected new %s because active stream limit was reached</yellow> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Stream</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Limit</blue>: <cyan>%d</cyan>",
+			reason,
+			vpnPacket.SessionID,
+			vpnPacket.StreamID,
+			record.MaxActiveStreamsPerSession,
+		)
+	}
+
+	return true
+}
+
 func (s *Server) consumeInboundStreamAck(vpnPacket VpnProto.Packet, stream *Stream_server) bool {
 	if s == nil || stream == nil || stream.ARQ == nil {
 		return false
@@ -697,12 +725,16 @@ func (s *Server) handleStreamSynRequest(vpnPacket VpnProto.Packet, sessionRecord
 	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || sessionRecord == nil {
 		return false
 	}
+	record, ok := s.sessions.Get(vpnPacket.SessionID)
+	if !ok || record == nil {
+		return false
+	}
+
+	if !record.canCreateAdditionalStream(vpnPacket.StreamID) {
+		return s.rejectNewStreamBecauseLimit(record, vpnPacket)
+	}
 
 	if s.tryHandleImmediateConnectedStreamSyn(vpnPacket) {
-		record, ok := s.sessions.Get(vpnPacket.SessionID)
-		if !ok || record == nil {
-			return true
-		}
 		_ = s.queueImmediateControlAck(record, vpnPacket)
 		return true
 	}
@@ -716,10 +748,6 @@ func (s *Server) handleStreamSynRequest(vpnPacket VpnProto.Packet, sessionRecord
 		return false
 	}
 
-	record, ok := s.sessions.Get(vpnPacket.SessionID)
-	if !ok || record == nil {
-		return true
-	}
 	_ = s.queueImmediateControlAck(record, vpnPacket)
 	return true
 }
@@ -743,20 +771,21 @@ func (s *Server) handleSOCKS5SynRequest(vpnPacket VpnProto.Packet, sessionRecord
 	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || sessionRecord == nil {
 		return false
 	}
+	record, ok := s.sessions.Get(vpnPacket.SessionID)
+	if !ok || record == nil {
+		return false
+	}
+
+	if !record.canCreateAdditionalStream(vpnPacket.StreamID) {
+		return s.rejectNewStreamBecauseLimit(record, vpnPacket)
+	}
 
 	if s.tryHandleImmediateConnectedSOCKS5Syn(vpnPacket) {
-		record, ok := s.sessions.Get(vpnPacket.SessionID)
-		if !ok || record == nil {
-			return true
-		}
 		_ = s.queueImmediateControlAck(record, vpnPacket)
 		return true
 	}
+
 	if s.tryHandleImmediateRejectedSOCKS5Syn(vpnPacket) {
-		record, ok := s.sessions.Get(vpnPacket.SessionID)
-		if !ok || record == nil {
-			return true
-		}
 		_ = s.queueImmediateControlAck(record, vpnPacket)
 		return true
 	}
@@ -770,10 +799,6 @@ func (s *Server) handleSOCKS5SynRequest(vpnPacket VpnProto.Packet, sessionRecord
 		return false
 	}
 
-	record, ok := s.sessions.Get(vpnPacket.SessionID)
-	if !ok || record == nil {
-		return true
-	}
 	_ = s.queueImmediateControlAck(record, vpnPacket)
 	return true
 }

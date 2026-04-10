@@ -245,6 +245,18 @@ ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS = 120.0
 ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS = 90.0
 
 # ------------------------------------------------------------------------------
+# 8.0) Server-Side Session/Stream Limits
+# What this section does:
+# - Limits how many active sessions can exist at once on the server.
+# - Limits how many active non-control streams each session can open.
+# - These are enforced fully on the server and are not sent to the client
+#   during SESSION_ACCEPT.
+# ------------------------------------------------------------------------------
+
+MAX_ALLOWED_CLIENT_ACTIVE_SESSION = 255
+MAX_ALLOWED_CLIENT_ACTIVE_STREAMS_PER_SESSION = 1000
+
+# ------------------------------------------------------------------------------
 # 8.1) Client Policy Sync Limits
 # What this section does:
 # - Defines server-side limits/minimums that can later be sent to the client

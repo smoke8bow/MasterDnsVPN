@@ -156,6 +156,8 @@ SUPPORTED_UPLOAD_COMPRESSION_TYPES = [0, 3]
 SUPPORTED_DOWNLOAD_COMPRESSION_TYPES = [0, 3]
 MAX_ALLOWED_CLIENT_PACKET_DUPLICATION_COUNT = 999
 MAX_ALLOWED_CLIENT_SETUP_PACKET_DUPLICATION_COUNT = 999
+MAX_ALLOWED_CLIENT_ACTIVE_SESSION = 999
+MAX_ALLOWED_CLIENT_ACTIVE_STREAMS_PER_SESSION = 999999
 MAX_ALLOWED_CLIENT_UPLOAD_MTU = 999
 MAX_ALLOWED_CLIENT_DOWNLOAD_MTU = 999999
 MAX_ALLOWED_CLIENT_RX_TX_WORKERS = 999
@@ -179,6 +181,12 @@ MIN_ALLOWED_CLIENT_ARQ_INITIAL_RTO_SECONDS = 0.001
 	}
 	if cfg.ClientMaxSetupDuplicationCount != 15 {
 		t.Fatalf("unexpected setup duplication clamp: got=%d want=%d", cfg.ClientMaxSetupDuplicationCount, 15)
+	}
+	if cfg.MaxAllowedClientActiveSessions != 255 {
+		t.Fatalf("unexpected active session clamp: got=%d want=%d", cfg.MaxAllowedClientActiveSessions, 255)
+	}
+	if cfg.MaxAllowedClientActiveStreams != 65535 {
+		t.Fatalf("unexpected active streams clamp: got=%d want=%d", cfg.MaxAllowedClientActiveStreams, 65535)
 	}
 	if cfg.ClientMaxUploadMTU != 255 {
 		t.Fatalf("unexpected upload mtu clamp: got=%d want=%d", cfg.ClientMaxUploadMTU, 255)

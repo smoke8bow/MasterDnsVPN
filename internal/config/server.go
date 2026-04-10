@@ -86,6 +86,8 @@ type ServerConfig struct {
 	ARQDataNackRepeatSeconds          float64  `toml:"ARQ_DATA_NACK_REPEAT_SECONDS"`
 	ARQTerminalDrainTimeoutSec        float64  `toml:"ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS"`
 	ARQTerminalAckWaitTimeoutSec      float64  `toml:"ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS"`
+	MaxAllowedClientActiveSessions    int      `toml:"MAX_ALLOWED_CLIENT_ACTIVE_SESSION"`
+	MaxAllowedClientActiveStreams     int      `toml:"MAX_ALLOWED_CLIENT_ACTIVE_STREAMS_PER_SESSION"`
 	ClientMaxPacketDuplicationCount   int      `toml:"MAX_ALLOWED_CLIENT_PACKET_DUPLICATION_COUNT"`
 	ClientMaxSetupDuplicationCount    int      `toml:"MAX_ALLOWED_CLIENT_SETUP_PACKET_DUPLICATION_COUNT"`
 	ClientMaxUploadMTU                int      `toml:"MAX_ALLOWED_CLIENT_UPLOAD_MTU"`
@@ -171,6 +173,8 @@ func defaultServerConfig() ServerConfig {
 		ARQDataNackRepeatSeconds:          1.0,
 		ARQTerminalDrainTimeoutSec:        120.0,
 		ARQTerminalAckWaitTimeoutSec:      90.0,
+		MaxAllowedClientActiveSessions:    255,
+		MaxAllowedClientActiveStreams:     2000,
 		ClientMaxPacketDuplicationCount:   5,
 		ClientMaxSetupDuplicationCount:    6,
 		ClientMaxUploadMTU:                150,
@@ -406,6 +410,8 @@ func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 	cfg.ARQDataNackRepeatSeconds = clampFloat(defaultFloatAtMostZero(cfg.ARQDataNackRepeatSeconds, 1.0), 0.2, 30.0)
 	cfg.ARQTerminalDrainTimeoutSec = clampFloat(defaultFloatAtMostZero(cfg.ARQTerminalDrainTimeoutSec, 120.0), 10.0, 3600.0)
 	cfg.ARQTerminalAckWaitTimeoutSec = clampFloat(defaultFloatAtMostZero(cfg.ARQTerminalAckWaitTimeoutSec, 90.0), 5.0, 3600.0)
+	cfg.MaxAllowedClientActiveSessions = clampInt(defaultIntBelow(cfg.MaxAllowedClientActiveSessions, 1, defaultServerConfig().MaxAllowedClientActiveSessions), 1, 255)
+	cfg.MaxAllowedClientActiveStreams = clampInt(defaultIntBelow(cfg.MaxAllowedClientActiveStreams, 1, defaultServerConfig().MaxAllowedClientActiveStreams), 1, int(^uint16(0)))
 	cfg.ClientMaxPacketDuplicationCount = clampInt(defaultIntBelow(cfg.ClientMaxPacketDuplicationCount, 0, defaultServerConfig().ClientMaxPacketDuplicationCount), 0, min(15, int(^uint8(0))))
 	cfg.ClientMaxSetupDuplicationCount = clampInt(defaultIntBelow(cfg.ClientMaxSetupDuplicationCount, 0, defaultServerConfig().ClientMaxSetupDuplicationCount), 0, min(15, int(^uint8(0))))
 	cfg.ClientMaxUploadMTU = clampInt(defaultIntBelow(cfg.ClientMaxUploadMTU, 1, defaultServerConfig().ClientMaxUploadMTU), 1, int(^uint8(0)))
