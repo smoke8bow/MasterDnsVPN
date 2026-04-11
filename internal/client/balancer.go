@@ -1858,10 +1858,7 @@ func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connecti
 		return nil
 	}
 
-	latencyTolerance := uint64(15)
-	if bestLatency >= 200 {
-		latencyTolerance = 0
-	}
+	latencyTolerance := latencyToleranceForTier(bestLatency)
 	latencyCutoff := bestLatency + latencyTolerance
 
 	selected := make([]Connection, 0, len(lossShortlist))
@@ -1876,6 +1873,21 @@ func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connecti
 	}
 
 	return []Connection{b.connections[lossShortlist[0].idx]}
+}
+
+func latencyToleranceForTier(bestLatency uint64) uint64 {
+	if bestLatency >= 200 {
+		return 0
+	}
+
+	tolerance := bestLatency / 4
+	if tolerance < 2 {
+		tolerance = 2
+	}
+	if tolerance > 25 {
+		tolerance = 25
+	}
+	return tolerance
 }
 
 func (b *Balancer) leastLossTopRandomCandidatesLocked(excludeKey string) []Connection {
