@@ -493,6 +493,11 @@ jobs:
             border-left: 4px solid #5b84ff; background: #101735;
           }
           """
+          css_fa = """
+          body { direction: rtl; text-align: right; }
+          table { direction: rtl; }
+          th, td { text-align: right; }
+          """
 
           docs = [
               ("README.MD", "MasterDnsVPN Documentation", "README.html"),
@@ -510,6 +515,7 @@ jobs:
               html_lang = "fa" if is_fa else "en"
               html_dir = "rtl" if is_fa else "ltr"
               main_style = ' style="direction: rtl; text-align: right;"' if is_fa else ""
+              page_css = css + css_fa if is_fa else css
               md_text = src.read_text(encoding="utf-8", errors="ignore")
               body = markdown.markdown(
                   md_text,
@@ -522,7 +528,7 @@ jobs:
             <meta charset="utf-8" />
             <meta name="viewport" content="width=device-width, initial-scale=1" />
             <title>{title}</title>
-            <style>{css}</style>
+            <style>{page_css}</style>
           </head>
           <body>
             <main class="wrap"{main_style}>
