@@ -55,7 +55,9 @@ PROTOCOL_TYPE = "SOCKS5"
 # If you want other devices on your network to use this proxy, use "0.0.0.0"
 # and enable SOCKS5_AUTH.
 LISTEN_IP = "127.0.0.1"
-LISTEN_PORT = 18000
+# Changed from 18000 to 1080 since most SOCKS5-aware tools default to 1080,
+# which saves me from having to reconfigure each app manually.
+LISTEN_PORT = 1080
 
 # Local SOCKS5 authentication.
 # This protects the local proxy itself, not the remote server.
@@ -76,7 +78,4 @@ LOCAL_DNS_IP = "127.0.0.1"
 LOCAL_DNS_PORT = 53
 
 # Local DNS cache sizing.
-# Must be >= 1.
-LOCAL_DNS_CACHE_MAX_RECORDS = 10000
-
-# TTL used by the local DNS cac
+# Mu
