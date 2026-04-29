@@ -68,6 +68,6 @@ LISTEN_PORT = 1080
 SOCKS5_AUTH = false
 # NOTE: These credentials are only used when SOCKS5_AUTH = true.
 # Changed defaults to something less generic — update these before enabling auth.
-# To generate a random password on Linux/macOS: openssl rand -base64 18
-SOCKS5_USER = "vpnuser"
-SOCKS5_PASS = "changeme_before_enabling_auth"
+# To generate a strong password, you can use: openssl rand -base64 24
+SOCKS5_USER = "myuser"
+SOCKS5_PASS = ""
